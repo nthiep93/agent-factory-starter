@@ -1,0 +1,26 @@
+{
+  "name": "agent-factory-starter",
+  "private": true,
+  "packageManager": "pnpm@10.28.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "lint": "eslint . --max-warnings 0",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "verify": "pnpm lint && pnpm typecheck && pnpm test",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.15.0",
+    "prettier": "3.10.1",
+    "turbo": "^2.11.11",
+    "typescript": "~6.0.0",
+    "typescript-eslint": "^8.73.0"
+  }
+}

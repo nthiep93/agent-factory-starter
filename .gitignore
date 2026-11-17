@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.next/
+.turbo/
+coverage/
+*.tsbuildinfo
+
+# Secrets: never commit, agents are denied read access too
+.env
+.env.local
+.env.*.local
+secrets/
+
+# Claude Code
+.claude/worktrees/
+.claude/settings.local.json

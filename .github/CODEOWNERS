@@ -1,0 +1,7 @@
+# Replace @nthiep93. These paths are the factory's guardrails:
+# changes to them always need a human review.
+/.github/            @nthiep93
+/.claude/            @nthiep93
+/holdout/            @nthiep93
+/AGENTS.md           @nthiep93
+/CLAUDE.md           @nthiep93
