@@ -64,6 +64,33 @@ Runner tự chạy `pnpm verify` sau khi agent dừng, vì lời agent tự báo
 
 Bốn nhãn: `success` (merge được), `flawed` (sai, sửa prompt, `AGENTS.md` hoặc test), `blocked` (thiếu quyền hoặc dịch vụ), `manual` (anh tự làm). Pha 1 xong khi 2-3 phiên song song không đụng nhau và tỷ lệ `success` của việc thường lệ đủ ổn định để không cần ngồi canh.
 
+## Pha 2: agent chạy trên GitHub, giao việc bằng issue
+
+### Luồng làm việc
+
+1. Tạo issue bằng template **Agent task**: ghi mục tiêu, tiêu chí nghiệm thu và mức rủi ro.
+2. Đọc lại spec. Khi đủ rõ thì gắn nhãn **`agent`**. Đó là quyết định giao việc của anh.
+3. Workflow `Claude agent` chạy: viết test trước, chạy `pnpm verify`, nhờ subagent `reviewer` soát, rồi push nhánh `claude/...` và comment link mở PR. Tiến độ được cập nhật ngay trong comment trên issue.
+4. Anh mở PR từ link đó. CI `verify`, preview Vercel và workflow `Claude review` tự chạy.
+5. Anh xem preview và review, rồi merge. Production tự deploy.
+
+Ngoài luồng trên, anh có thể gõ `@claude ...` trong bất kỳ issue hay PR nào để hỏi, sửa thêm, hoặc yêu cầu `@claude review again`.
+
+### Cài đặt (làm một lần)
+
+1. Cài Claude GitHub App cho repo: https://github.com/apps/claude
+2. Thêm secret: Settings → Secrets and variables → Actions → `ANTHROPIC_API_KEY`
+3. Tạo label `agent`: Issues → Labels → New label
+
+### Giới hạn và an toàn
+
+- Chỉ người có quyền write mới kích hoạt được workflow. Bot bị chặn.
+- Claude không tự tạo hay merge PR. Nó chỉ push nhánh và đưa link.
+- Mỗi lần chạy có giới hạn: agent tối đa 40 turn và 30 phút; review tối đa 20 turn và 15 phút.
+- Cả hai workflow tắt auto mode: agent dùng `acceptEdits`, review dùng `default`, nên chỉ những lệnh có trong allow list mới chạy được. Review không có quyền approve, merge hay sửa file; agent không sửa được `.github/`, `.claude/`, `holdout/`.
+- Không gắn nhãn `agent` cho việc rủi ro cao (auth, dữ liệu, tiền, bảo mật).
+- Trên PR, action lấy `.claude/`, `CLAUDE.md`, `AGENTS.md` từ nhánh gốc, nên PR không tự nới được guardrail của mình. Tuy vậy, `pnpm verify` vẫn chạy `package.json` của PR với API key trong môi trường. Với repo một người thì chấp nhận được; khi mở repo cho người ngoài, cần siết lại.
+
 ## Cấu hình GitHub
 
 - `main` có branch protection: bắt buộc PR và check `verify`.

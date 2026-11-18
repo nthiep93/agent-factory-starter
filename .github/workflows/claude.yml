@@ -1,0 +1,67 @@
+name: Claude agent
+
+# Turns an issue into a pushed branch, or answers on a PR.
+#   - Label an issue `agent` (the dispatch decision), or
+#   - mention @claude in a new issue, an issue comment, a PR comment or a review.
+# Only users with write access can trigger it. Claude pushes a claude/*
+# branch and replies with a link to open the PR; a human opens and merges it.
+
+on:
+  issues:
+    types: [opened, labeled]
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
+
+jobs:
+  claude:
+    if: |
+      (github.event_name == 'issues' && github.event.action == 'labeled' && github.event.label.name == 'agent') ||
+      (github.event_name == 'issues' && github.event.action == 'opened' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude'))) ||
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude'))
+    # Job-level so skipped events never join the group. One run per issue/PR at
+    # a time; GitHub keeps only the newest waiting request.
+    concurrency:
+      group: claude-${{ github.event.issue.number || github.event.pull_request.number }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      # Installed before Claude starts so it can run pnpm verify on its own work.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          label_trigger: agent
+          track_progress: ${{ github.event_name == 'issues' }}
+          additional_permissions: |
+            actions: read
+          # acceptEdits: workspace edits allowed, every other call must match an
+          # allow rule (auto mode would treat the list as advisory).
+          claude_args: |
+            --permission-mode acceptEdits
+            --max-turns 40
+            --allowedTools "Bash(pnpm install --frozen-lockfile),Bash(pnpm verify),Bash(pnpm lint),Bash(pnpm typecheck),Bash(pnpm test),Bash(pnpm build),Bash(pnpm format)"
+            --disallowedTools "Edit(.github/**),Write(.github/**),Edit(.claude/**),Write(.claude/**),Read(holdout/**),Edit(holdout/**),Write(holdout/**),Bash(gh pr merge:*),Bash(gh pr review:*)"
+            --append-system-prompt "You run in CI for the agent-factory-starter repo. Follow AGENTS.md. If you switch to an existing PR branch, run pnpm install --frozen-lockfile first. For an implementation request, follow .claude/skills/implement-task/SKILL.md: acceptance criteria first, tests first, then the reviewer subagent. Before your last commit run pnpm format and pnpm verify, and quote the verify summary line in your reply. If the issue lacks acceptance criteria or is ambiguous, ask in a comment and stop instead of guessing."
