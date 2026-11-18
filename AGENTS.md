@@ -11,6 +11,13 @@ Turborepo monorepo, pnpm workspaces, Node 22, TypeScript strict.
 - Test one package: `pnpm --filter api test` (also `web`, `@repo/shared`)
 - Test one file: `pnpm --filter api exec vitest run src/health/health.controller.test.ts`
 - Build: `pnpm build`
+- Run locally: `pnpm dev` (ports come from `.worktree.env` inside a worktree, otherwise web 3000 / api 3001)
+
+## Workflow
+
+- `main` is protected. Work on a branch and open a PR; never push to `main`.
+- Parallel work happens in worktrees under `.claude/worktrees/`, created with `pnpm wt new <name>`. Stay inside your worktree; do not edit files in another one.
+- Before calling a task done, have the `reviewer` subagent check your diff against the task.
 
 ## Map
 
@@ -32,6 +39,7 @@ Turborepo monorepo, pnpm workspaces, Node 22, TypeScript strict.
 - Apps import `@repo/shared` from its `dist/`. After changing it, run `pnpm build --filter @repo/shared` (the `typecheck` and `test` tasks do this for you through turbo).
 - `apps/api` is ESM (`"type": "module"`, `nodenext`) because NestJS 12 ships ESM only. Relative imports need the `.js` extension: `import { X } from "./x.service.js"`. Vercel's runtime cannot `require()` ESM, so a CommonJS build fails there even when it runs locally.
 - API tests run through SWC (`apps/api/vitest.config.mts`) because Nest DI needs decorator metadata. Do not remove the plugin.
+- `apps/web/next-env.d.ts` is generated and gitignored; `pnpm typecheck` regenerates it with `next typegen`. `apps/web/AGENTS.md` is written by `next dev`; keep it committed.
 - TypeScript is pinned to 6.0.x because typescript-eslint does not support 7 yet. Do not bump it.
 
 ## Done means

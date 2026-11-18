@@ -30,12 +30,46 @@ Cần Node 22+, pnpm 10 và `jq` (các hook dùng `jq`).
 
 Hook `Stop` chạy `pnpm typecheck`: agent không thể kết thúc lượt khi typecheck còn lỗi.
 
-## Việc anh cần làm tay sau khi push lên GitHub
+## Pha 1: nhiều agent song song, có nhật ký đo được
 
-1. `CODEOWNERS` đã trỏ về `@nthiep93`.
-2. Bật branch protection cho `main`: bắt buộc PR, bắt buộc check `verify`, bắt buộc review của code owner.
-3. Chạy `chmod +x .claude/hooks/*.sh` nếu quyền thực thi bị mất khi giải nén.
-4. Mở Claude Code trong repo, chạy `/context` để xác nhận `CLAUDE.md` đã nạp `AGENTS.md`.
+### Worktree không giẫm cổng
+
+```bash
+pnpm wt new auth-login      # .claude/worktrees/auth-login, nhánh wt/auth-login, web 3010 / api 3011
+pnpm wt new fix-header      # slot kế tiếp: web 3020 / api 3021
+pnpm wt list
+cd .claude/worktrees/auth-login && claude     # mỗi worktree một phiên Claude Code
+pnpm dev                                      # trong worktree: tự dùng cổng của slot
+pnpm wt rm auth-login                         # từ chối nếu còn thay đổi chưa commit
+```
+
+Git worktree cách ly file nhưng không cách ly cổng, nên mỗi worktree nhận một slot N (1-9): web `3000+10N`, api `3001+10N`. File trong `.worktreeinclude` (ví dụ `.env`) được chép sang.
+
+### Một task từ mô tả đến nhánh đã push
+
+Trong Claude Code: `/implement-task thêm endpoint GET /version trả commit đang chạy`
+
+Skill này bắt agent viết test trước, chạy `pnpm verify`, gọi subagent `reviewer` soát diff, commit, rồi in link mở PR.
+
+### Chạy headless và ghi nhật ký
+
+```bash
+export ANTHROPIC_API_KEY=...        # headless cần API key
+pnpm agent:run -w auth-login -b 2 "Implement the login form from docs/specs/login.md"
+pnpm agent:label <run-id> success   # hoặc flawed | blocked | manual, kèm ghi chú
+pnpm agent:stats                    # tỷ lệ success, verify độc lập, chi phí, thời gian
+```
+
+Runner tự chạy `pnpm verify` sau khi agent dừng, vì lời agent tự báo "xong" không phải bằng chứng. Nhật ký nằm ở `.agent-runs/` (gitignored).
+
+Bốn nhãn: `success` (merge được), `flawed` (sai, sửa prompt, `AGENTS.md` hoặc test), `blocked` (thiếu quyền hoặc dịch vụ), `manual` (anh tự làm). Pha 1 xong khi 2-3 phiên song song không đụng nhau và tỷ lệ `success` của việc thường lệ đủ ổn định để không cần ngồi canh.
+
+## Cấu hình GitHub
+
+- `main` có branch protection: bắt buộc PR và check `verify`.
+- Repo một người: đừng bật "Require approvals", vì GitHub không cho tác giả tự duyệt PR của mình. Bật lại cùng "Require review from Code Owners" khi có người thứ hai.
+- Chạy `chmod +x .claude/hooks/*.sh scripts/*.sh` nếu quyền thực thi bị mất khi giải nén.
+- Mở Claude Code trong repo, chạy `/context` để xác nhận `CLAUDE.md` đã nạp `AGENTS.md`.
 
 ## Kiểm tra guardrail
 
