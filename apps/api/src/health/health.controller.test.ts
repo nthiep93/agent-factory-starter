@@ -1,8 +1,8 @@
 import "reflect-metadata";
 import { Test } from "@nestjs/testing";
 import { describe, expect, it } from "vitest";
-import { HealthController } from "./health.controller";
-import { HealthService } from "./health.service";
+import { HealthController } from "./health.controller.js";
+import { HealthService } from "./health.service.js";
 
 describe("HealthController", () => {
   it("resolves through Nest DI and reports ok", async () => {

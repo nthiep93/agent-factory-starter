@@ -30,6 +30,7 @@ Turborepo monorepo, pnpm workspaces, Node 22, TypeScript strict.
 ## Gotchas
 
 - Apps import `@repo/shared` from its `dist/`. After changing it, run `pnpm build --filter @repo/shared` (the `typecheck` and `test` tasks do this for you through turbo).
+- `apps/api` is ESM (`"type": "module"`, `nodenext`) because NestJS 12 ships ESM only. Relative imports need the `.js` extension: `import { X } from "./x.service.js"`. Vercel's runtime cannot `require()` ESM, so a CommonJS build fails there even when it runs locally.
 - API tests run through SWC (`apps/api/vitest.config.mts`) because Nest DI needs decorator metadata. Do not remove the plugin.
 - TypeScript is pinned to 6.0.x because typescript-eslint does not support 7 yet. Do not bump it.
 
