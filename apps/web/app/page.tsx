@@ -1,12 +1,17 @@
-import { buildHealth } from "@repo/shared";
-import { fetchApiHealth } from "@/lib/api";
+import { buildHealth, buildVersion } from "@repo/shared";
+import { describeVersion, fetchApiHealth, fetchApiVersion } from "@/lib/api";
 import { formatUptime } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
 
 export default async function HomePage() {
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL;
   const web = buildHealth("web", process.uptime());
-  const api = await fetchApiHealth(process.env.NEXT_PUBLIC_API_URL);
+  const webVersion = buildVersion("web", process.env);
+  const [apiHealth, apiVersion] = await Promise.all([
+    fetchApiHealth(apiUrl),
+    fetchApiVersion(apiUrl),
+  ]);
 
   return (
     <main style={{ fontFamily: "system-ui, sans-serif", maxWidth: 640, margin: "48px auto" }}>
@@ -20,9 +25,20 @@ export default async function HomePage() {
         </li>
         <li>
           api:{" "}
-          {api.reachable
-            ? `${api.data.status} (${formatUptime(api.data.uptimeSeconds)})`
-            : `unreachable: ${api.reason}`}
+          {apiHealth.reachable
+            ? `${apiHealth.data.status} (${formatUptime(apiHealth.data.uptimeSeconds)})`
+            : `unreachable: ${apiHealth.reason}`}
+        </li>
+      </ul>
+
+      <h2>Phiên bản đang chạy</h2>
+      <ul>
+        <li>web: {describeVersion(webVersion)}</li>
+        <li>
+          api:{" "}
+          {apiVersion.reachable
+            ? describeVersion(apiVersion.data)
+            : `unreachable: ${apiVersion.reason}`}
         </li>
       </ul>
     </main>

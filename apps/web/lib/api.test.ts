@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { fetchApiHealth } from "./api";
+import { describeVersion, fetchApiHealth, fetchApiVersion } from "./api";
 
 const ok = { status: "ok", service: "api", uptimeSeconds: 3 };
 
@@ -30,5 +30,41 @@ describe("fetchApiHealth", () => {
       reachable: false,
       reason: "ECONNREFUSED",
     });
+  });
+});
+
+describe("fetchApiVersion", () => {
+  it("calls /version and returns the payload", async () => {
+    const version = { service: "api", commit: "bfa1df8", branch: "main" };
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(JSON.stringify(version)));
+    const result = await fetchApiVersion("https://api.example.com", fetchImpl);
+    expect(fetchImpl).toHaveBeenCalledWith("https://api.example.com/version", {
+      cache: "no-store",
+    });
+    expect(result).toEqual({ reachable: true, data: version });
+  });
+
+  it("reports an unreachable API instead of throwing", async () => {
+    const boom = vi.fn().mockRejectedValue(new Error("ETIMEDOUT"));
+    expect(await fetchApiVersion("https://x", boom)).toEqual({
+      reachable: false,
+      reason: "ETIMEDOUT",
+    });
+  });
+});
+
+describe("describeVersion", () => {
+  it("shows commit and branch", () => {
+    expect(describeVersion({ service: "web", commit: "bfa1df8", branch: "main" })).toBe(
+      "bfa1df8 (main)",
+    );
+  });
+
+  it("shows the commit alone without a branch", () => {
+    expect(describeVersion({ service: "web", commit: "bfa1df8", branch: null })).toBe("bfa1df8");
+  });
+
+  it("shows local outside Vercel", () => {
+    expect(describeVersion({ service: "web", commit: null, branch: null })).toBe("local");
   });
 });

@@ -1,3 +1,5 @@
+export { buildVersion, type VersionResponse } from "./version";
+
 export type HealthStatus = "ok" | "degraded";
 
 export interface HealthResponse {
