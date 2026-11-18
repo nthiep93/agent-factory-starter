@@ -40,6 +40,7 @@ Turborepo monorepo, pnpm workspaces, Node 22, TypeScript strict.
 - `apps/api` is ESM (`"type": "module"`, `nodenext`) because NestJS 12 ships ESM only. Relative imports need the `.js` extension: `import { X } from "./x.service.js"`. Vercel's runtime cannot `require()` ESM, so a CommonJS build fails there even when it runs locally.
 - API tests run through SWC (`apps/api/vitest.config.mts`) because Nest DI needs decorator metadata. Do not remove the plugin.
 - `apps/web/next-env.d.ts` is generated and gitignored; `pnpm typecheck` regenerates it with `next typegen`. `apps/web/AGENTS.md` is written by `next dev`; keep it committed.
+- In GitHub Actions the `Stop` typecheck hook is skipped (it would run PR-controlled scripts with secrets in the environment). There, run `pnpm verify` yourself before finishing; the CI `verify` job is the gate.
 - TypeScript is pinned to 6.0.x because typescript-eslint does not support 7 yet. Do not bump it.
 
 ## Done means

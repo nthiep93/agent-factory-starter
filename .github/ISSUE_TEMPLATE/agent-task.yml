@@ -1,0 +1,41 @@
+name: Agent task
+description: A small, well-specified task for the Claude agent. Add the `agent` label when the spec is ready.
+title: "[agent] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Write this so someone who has never seen the codebase could do it. The agent starts
+        when a maintainer adds the **agent** label, so leave it off until the spec is complete.
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What should change, and why, in one or two sentences.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: One checkable statement per line. These become the tests.
+      placeholder: |
+        - GET /todos returns [] when there are no todos
+        - POST /todos with an empty title returns 400
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: In scope / out of scope
+      description: Where the change should go (apps/api, apps/web, packages/shared) and what not to touch.
+  - type: dropdown
+    id: risk
+    attributes:
+      label: Risk
+      options:
+        - Low (tests, docs, small isolated feature)
+        - Medium (touches shared types or several apps)
+        - High (auth, data, money, security) - do not label for the agent
+    validations:
+      required: true
