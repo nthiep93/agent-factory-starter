@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { describeVersion, fetchApiHealth, fetchApiVersion } from "./api";
+import { describeVersion, fetchApiHealth, fetchApiVersion, resolveApiUrl } from "./api";
 
 const ok = { status: "ok", service: "api", uptimeSeconds: 3 };
 
@@ -66,5 +66,34 @@ describe("describeVersion", () => {
 
   it("shows local outside Vercel", () => {
     expect(describeVersion({ service: "web", commit: null, branch: null })).toBe("local");
+  });
+});
+
+describe("resolveApiUrl", () => {
+  it("prefers the runtime API_URL over the build-time NEXT_PUBLIC_API_URL", () => {
+    expect(resolveApiUrl("http://runtime:3001", "https://public.example.com")).toBe(
+      "http://runtime:3001",
+    );
+  });
+
+  it("falls back to NEXT_PUBLIC_API_URL when API_URL is unset or blank", () => {
+    expect(resolveApiUrl(undefined, "https://public.example.com")).toBe(
+      "https://public.example.com",
+    );
+    expect(resolveApiUrl("  ", "https://public.example.com")).toBe("https://public.example.com");
+  });
+
+  it("returns undefined when neither is set", () => {
+    expect(resolveApiUrl(undefined, undefined)).toBeUndefined();
+    expect(resolveApiUrl("", " ")).toBeUndefined();
+  });
+});
+
+describe("missing base URL", () => {
+  it("names both variables in the reason", async () => {
+    expect(await fetchApiHealth(undefined, vi.fn())).toEqual({
+      reachable: false,
+      reason: "API_URL / NEXT_PUBLIC_API_URL is not set",
+    });
   });
 });

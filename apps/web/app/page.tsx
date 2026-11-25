@@ -1,11 +1,12 @@
 import { buildHealth, buildVersion } from "@repo/shared";
-import { describeVersion, fetchApiHealth, fetchApiVersion } from "@/lib/api";
+import { describeVersion, fetchApiHealth, fetchApiVersion, resolveApiUrl } from "@/lib/api";
 import { formatUptime } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
 
 export default async function HomePage() {
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+  // API_URL (run time) first; on Vercel only NEXT_PUBLIC_API_URL is set, so nothing changes there.
+  const apiUrl = resolveApiUrl(process.env.API_URL, process.env.NEXT_PUBLIC_API_URL);
   const web = buildHealth("web", process.uptime());
   const webVersion = buildVersion("web", process.env);
   const [apiHealth, apiVersion] = await Promise.all([
