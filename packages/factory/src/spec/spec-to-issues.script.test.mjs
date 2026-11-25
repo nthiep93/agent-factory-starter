@@ -22,11 +22,14 @@ describe("spec-to-issues dry run", () => {
     expect(stdout).toContain("Order: T1 -> T2 -> T3");
     expect(stdout).toContain("=== 1/3  T1 -> #1  [agent] Add TimeResponse and buildTime");
     expect(stdout).toContain("- Depends on #1 (T1)\n- Depends on #2 (T2)");
+    expect(stdout).toMatch(/T1 -> #1 .*\nlabels: {2}risk:low, agent\n/);
+    expect(stdout).toMatch(/T2 -> #2 .*\nlabels: {2}risk:low, waiting-on-deps\n/);
+    expect(stdout).toMatch(/T3 -> #3 .*\nlabels: {2}risk:low, waiting-on-deps\n/);
     expect(stdout).toContain("[spec.md](specs/001-time-endpoint/spec.md)");
     expect(gh.readCalls()).toEqual([]);
   });
 
-  it("orders by dependency and keeps high-risk tasks away from the agent", () => {
+  it("orders by dependency, parks dependent tasks and keeps high-risk tasks from the agent", () => {
     const { cwd, rel } = writeSpec(
       task("T1", { depends: "T2" }) + "\n" + task("T2", { risk: "high", area: "shared" }),
     );
@@ -34,7 +37,8 @@ describe("spec-to-issues dry run", () => {
     expect(status).toBe(0);
     expect(stdout).toContain("Order: T2 -> T1");
     expect(stdout).toMatch(/=== 1\/2 {2}T2 -> #1 .*\nlabels: {2}risk:high\n/);
-    expect(stdout).toMatch(/=== 2\/2 {2}T1 -> #2 .*\nlabels: {2}risk:low, agent\n/);
+    expect(stdout).toMatch(/=== 2\/2 {2}T1 -> #2 .*\nlabels: {2}risk:low, waiting-on-deps\n/);
+    expect(stdout).toContain("High risk: a human must implement this task");
   });
 });
 
@@ -53,13 +57,19 @@ describe("spec-to-issues --create", () => {
     expect(calls.map((c) => c.args.slice(0, 2).join(" "))).toEqual([
       "label list",
       "label create",
+      "label create",
+      "label create",
       "issue create",
       "issue create",
       "issue create",
     ]);
-    expect(calls[1].args.slice(0, 3)).toEqual(["label", "create", "risk:low"]);
+    expect(calls.slice(1, 4).map((c) => c.args[2])).toEqual([
+      "ready-for-agent",
+      "risk:low",
+      "waiting-on-deps",
+    ]);
 
-    const issues = calls.slice(2);
+    const issues = calls.slice(4);
     const flag = (args, name) => args.flatMap((a, i) => (args[i - 1] === name ? [a] : []));
     expect(issues.map((c) => flag(c.args, "--title")[0])).toEqual([
       "[agent] Add TimeResponse and buildTime to packages/shared",
@@ -68,8 +78,8 @@ describe("spec-to-issues --create", () => {
     ]);
     expect(issues.map((c) => flag(c.args, "--label"))).toEqual([
       ["risk:low", "agent"],
-      ["risk:low", "agent"],
-      ["risk:low", "agent"],
+      ["risk:low", "waiting-on-deps"],
+      ["risk:low", "waiting-on-deps"],
     ]);
     expect(issues[0].body).toContain("### Dependencies\n\nNone.");
     expect(issues[1].body).toContain("- Depends on #101 (T1)");

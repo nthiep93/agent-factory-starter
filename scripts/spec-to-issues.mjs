@@ -26,6 +26,11 @@ const LABEL_STYLE = {
   "risk:low": { color: "0e8a16", description: "Tests, docs, small isolated feature" },
   "risk:medium": { color: "fbca04", description: "Touches shared types or several apps" },
   "risk:high": { color: "d93f0b", description: "Auth, data, money, security: humans only" },
+  "waiting-on-deps": {
+    color: "c5def5",
+    description: "Blocked until the issues it depends on are closed",
+  },
+  "ready-for-agent": { color: "0075ca", description: "Dependencies closed: add agent to start" },
 };
 
 const args = process.argv.slice(2);
@@ -45,9 +50,8 @@ const specModule = join(distDir, "spec", "index.js");
 if (!existsSync(specModule)) {
   die(`Compiled @repo/factory not found at ${specModule}.\nRun: pnpm build --filter @repo/factory`);
 }
-const { parseTasks, validateTasks, orderTasks, taskToIssue } = createRequire(import.meta.url)(
-  specModule,
-);
+const { parseTasks, validateTasks, orderTasks, taskToIssue, WAITING_LABEL, READY_LABEL } =
+  createRequire(import.meta.url)(specModule);
 
 // Paths in issue bodies are relative to the repo root when the spec lives in it.
 const specPath = resolve(positional[0]);
@@ -117,7 +121,10 @@ const ghFailure = (what, error) => {
 };
 
 // Labels must exist before `gh issue create --label` can use them.
-const wanted = [...new Set(plan.flatMap((issue) => issue.labels))].sort();
+// ready-for-agent too, so the unblock-tasks workflow can swap to it later.
+const used = plan.flatMap((issue) => issue.labels);
+if (used.includes(WAITING_LABEL)) used.push(READY_LABEL);
+const wanted = [...new Set(used)].sort();
 let existing;
 try {
   const listed = JSON.parse(gh(["label", "list", "--limit", "500", "--json", "name"]));
