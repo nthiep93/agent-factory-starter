@@ -1,0 +1,16 @@
+[
+  {
+    "filename": "apps/api/src/health/health.service.ts",
+    "status": "modified",
+    "additions": 3,
+    "deletions": 1,
+    "changes": 4
+  },
+  {
+    "filename": "apps/api/src/health/health.controller.test.ts",
+    "status": "modified",
+    "additions": 8,
+    "deletions": 0,
+    "changes": 8
+  }
+]

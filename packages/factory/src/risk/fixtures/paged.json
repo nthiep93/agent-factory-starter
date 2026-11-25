@@ -1,0 +1,12 @@
+[
+  [{ "filename": "docs/a.md", "status": "modified", "additions": 1, "deletions": 0, "changes": 1 }],
+  [
+    {
+      "filename": "holdout/api.test.mjs",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 0,
+      "changes": 1
+    }
+  ]
+]

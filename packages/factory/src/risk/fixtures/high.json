@@ -1,0 +1,16 @@
+[
+  {
+    "filename": ".github/workflows/ci.yml",
+    "status": "modified",
+    "additions": 1,
+    "deletions": 1,
+    "changes": 2
+  },
+  {
+    "filename": "apps/web/lib/api.test.ts",
+    "status": "removed",
+    "additions": 0,
+    "deletions": 70,
+    "changes": 70
+  }
+]

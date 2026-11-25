@@ -1,0 +1,16 @@
+[
+  {
+    "filename": "docs/gates.md",
+    "status": "modified",
+    "additions": 40,
+    "deletions": 2,
+    "changes": 42
+  },
+  {
+    "filename": "apps/web/lib/format.test.ts",
+    "status": "added",
+    "additions": 20,
+    "deletions": 0,
+    "changes": 20
+  }
+]
