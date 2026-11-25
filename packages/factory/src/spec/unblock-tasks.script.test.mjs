@@ -25,8 +25,9 @@ function world(issues, states) {
   return { FAKE_GH_ISSUES: join(dir, "issues.json"), FAKE_GH_STATES: statesDir };
 }
 
-const CLOSED = { state: "CLOSED", stateReason: "COMPLETED" };
-const OPEN = { state: "OPEN", stateReason: "" };
+const url = (n, kind = "issues") => `https://github.com/o/r/${kind}/${n}`;
+const CLOSED = (n) => ({ state: "CLOSED", stateReason: "COMPLETED", url: url(n) });
+const OPEN = (n) => ({ state: "OPEN", stateReason: null, url: url(n) });
 
 const run = (args, gh, env) =>
   runScript("unblock-tasks.mjs", args, {
@@ -70,10 +71,10 @@ describe("unblock-tasks", () => {
         { number: 24, labels: waiting, body: deps("- Depends on #13 (T5)") },
       ],
       {
-        10: CLOSED,
-        11: CLOSED,
-        12: OPEN,
-        13: { state: "CLOSED", stateReason: "NOT_PLANNED" },
+        10: CLOSED(10),
+        11: CLOSED(11),
+        12: OPEN(12),
+        13: { state: "CLOSED", stateReason: "NOT_PLANNED", url: url(13) },
       },
     );
     const { status, stdout, stderr } = run([], gh, env);
@@ -102,14 +103,14 @@ describe("unblock-tasks", () => {
     expect(stdout).toContain("#21: waiting on #12");
     expect(stdout).toContain("#22: waiting on T4 (no issue yet)");
     expect(stdout).toContain("#23: no Depends on #N lines, left for a human");
-    expect(stdout).toContain("#24: waiting on #13 (closed as not planned)");
+    expect(stdout).toContain("#24: waiting on #13 (closed as not_planned)");
     expect(stdout).toContain("Unblocked 1 of 5 waiting issues.");
   });
 
   it("uses singular wording for one dependency and creates the ready label when missing", () => {
     const gh = fakeGh();
     const env = world([{ number: 30, labels: waiting, body: deps("- Depends on #10 (T1)") }], {
-      10: CLOSED,
+      10: CLOSED(10),
     });
     const { status } = run([], gh, { ...env, FAKE_GH_LABELS: '[{"name":"waiting-on-deps"}]' });
     expect(status).toBe(0);
@@ -126,12 +127,80 @@ describe("unblock-tasks", () => {
   it("changes nothing with --dry-run", () => {
     const gh = fakeGh();
     const env = world([{ number: 20, labels: waiting, body: deps("- Depends on #10 (T1)") }], {
-      10: CLOSED,
+      10: CLOSED(10),
     });
     const { status, stdout } = run(["--dry-run"], gh, env);
     expect(status).toBe(0);
     expect(stdout).toContain("#20: ready-for-agent (dependency #10 closed) [dry run]");
     expect(summary(gh).every((c) => /^(issue list|issue view|label list)/.test(c))).toBe(true);
+  });
+
+  it("counts a dependency as done only when closed as COMPLETED", () => {
+    const gh = fakeGh();
+    const issues = [31, 32, 33, 34].map((n, i) => ({
+      number: n,
+      labels: waiting,
+      body: deps(`- Depends on #${40 + i} (T1)`),
+    }));
+    const env = world(issues, {
+      40: { state: "CLOSED", stateReason: "DUPLICATE", url: url(40) },
+      41: { state: "CLOSED", stateReason: null, url: url(41) },
+      42: { state: "CLOSED", stateReason: "", url: url(42) },
+      43: { state: "CLOSED", url: url(43) },
+    });
+    const { status, stdout } = run([], gh, env);
+    expect(status).toBe(0);
+    expect(stdout).toContain("#31: waiting on #40 (closed as duplicate)");
+    expect(stdout).toContain("#32: waiting on #41 (closed without a reason)");
+    expect(stdout).toContain("#33: waiting on #42 (closed without a reason)");
+    expect(stdout).toContain("#34: waiting on #43 (closed without a reason)");
+    expect(stdout).toContain("Unblocked 0 of 4 waiting issues.");
+    expect(summary(gh).some((c) => c.startsWith("issue edit"))).toBe(false);
+  });
+
+  it("requests the url and rejects a pull request as a dependency", () => {
+    const gh = fakeGh();
+    const env = world([{ number: 20, labels: waiting, body: deps("- Depends on #15 (T1)") }], {
+      15: { state: "CLOSED", stateReason: "COMPLETED", url: url(15, "pull") },
+    });
+    const { status, stdout } = run([], gh, env);
+    expect(status).toBe(0);
+    expect(summary(gh)).toContain("issue view 15 | --json | state,stateReason,url");
+    expect(stdout).toContain("#20: waiting on #15 (unknown)");
+  });
+
+  it("only acts on risk:low or risk:medium issues", () => {
+    const gh = fakeGh();
+    const env = world(
+      [
+        {
+          number: 50,
+          labels: [{ name: "risk:high" }, { name: "waiting-on-deps" }],
+          body: deps("- Depends on #10 (T1)"),
+        },
+        { number: 51, labels: [{ name: "waiting-on-deps" }], body: deps("- Depends on #10 (T1)") },
+        {
+          number: 52,
+          labels: [{ name: "risk:low" }, { name: "risk:high" }, { name: "waiting-on-deps" }],
+          body: deps("- Depends on #10 (T1)"),
+        },
+        {
+          number: 53,
+          labels: [{ name: "risk:medium" }, { name: "waiting-on-deps" }],
+          body: deps("- Depends on #10 (T1)"),
+        },
+      ],
+      { 10: CLOSED(10) },
+    );
+    const { status, stdout } = run([], gh, env);
+    expect(status).toBe(0);
+    expect(stdout).toContain("#50: skipped, not labeled risk:low or risk:medium");
+    expect(stdout).toContain("#51: skipped, not labeled risk:low or risk:medium");
+    expect(stdout).toContain("#52: skipped, not labeled risk:low or risk:medium");
+    expect(stdout).toContain("#53: ready-for-agent (dependency #10 closed)");
+    expect(summary(gh).filter((c) => c.startsWith("issue edit"))).toEqual([
+      "issue edit 53 | --remove-label | waiting-on-deps | --add-label | ready-for-agent",
+    ]);
   });
 
   it("treats a dependency gh cannot find as not closed", () => {
@@ -150,7 +219,7 @@ describe("unblock-tasks", () => {
         { number: 20, labels: waiting, body: deps("- Depends on #10 (T1)") },
         { number: 21, labels: waiting, body: deps("- Depends on #10 (T1)") },
       ],
-      { 10: CLOSED },
+      { 10: CLOSED(10) },
     );
     const { status, stdout, stderr } = run([], gh, { ...env, FAKE_GH_FAIL_EDIT: "20" });
     expect(status).toBe(1);

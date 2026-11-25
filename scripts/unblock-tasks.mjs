@@ -1,5 +1,6 @@
-// Moves issues labeled waiting-on-deps to ready-for-agent once every issue in
-// their "- Depends on #N" lines is closed (as completed), and comments so a
+// Moves issues labeled waiting-on-deps (and risk:low or risk:medium) to
+// ready-for-agent once every issue in their "- Depends on #N" lines is closed
+// as completed, and comments so a
 // maintainer can add the `agent` label. Run by .github/workflows/unblock-tasks.yml
 // when an issue closes; safe to run by hand.
 //
@@ -72,16 +73,29 @@ if (!Array.isArray(waiting) || waiting.length === 0) {
   process.exit(0);
 }
 
-// State of each dependency, looked up once: "closed", "not-planned", "open" or "unknown".
+// Each dependency is looked up once. It is done only when it is an issue (not
+// a pull request) closed as COMPLETED; DUPLICATE, NOT_PLANNED or no reason do not count.
 const states = new Map();
 const stateOf = (number) => {
   if (!states.has(number)) {
-    let state = "unknown";
+    let state = { done: false, note: "unknown" };
     try {
-      const view = JSON.parse(gh(["issue", "view", String(number), "--json", "state,stateReason"]));
-      if (view.state === "CLOSED")
-        state = view.stateReason === "NOT_PLANNED" ? "not-planned" : "closed";
-      else if (view.state === "OPEN") state = "open";
+      const view = JSON.parse(
+        gh(["issue", "view", String(number), "--json", "state,stateReason,url"]),
+      );
+      const isIssue = typeof view.url === "string" && view.url.includes("/issues/");
+      if (!isIssue) state = { done: false, note: "unknown" };
+      else if (view.state === "OPEN") state = { done: false, note: null };
+      else if (view.state === "CLOSED" && view.stateReason === "COMPLETED") {
+        state = { done: true, note: null };
+      } else if (view.state === "CLOSED") {
+        state = {
+          done: false,
+          note: view.stateReason
+            ? `closed as ${String(view.stateReason).toLowerCase()}`
+            : "closed without a reason",
+        };
+      }
     } catch (error) {
       err(`Could not read #${number}: ${ghError(error)}`);
     }
@@ -89,6 +103,8 @@ const stateOf = (number) => {
   }
   return states.get(number);
 };
+
+const DISPATCHABLE_RISKS = ["risk:low", "risk:medium"];
 
 let readyLabelChecked = false;
 const ensureReadyLabel = () => {
@@ -119,6 +135,11 @@ for (const issue of waiting) {
   const number = Number(issue.number);
   if (!Number.isSafeInteger(number)) continue;
   const body = typeof issue.body === "string" ? issue.body : "";
+  const labels = Array.isArray(issue.labels) ? issue.labels.map((label) => label?.name) : [];
+  if (labels.includes("risk:high") || !labels.some((name) => DISPATCHABLE_RISKS.includes(name))) {
+    out(`#${number}: skipped, not labeled risk:low or risk:medium`);
+    continue;
+  }
 
   const unlinked = parseUnlinkedDependencies(body);
   if (unlinked.length) {
@@ -130,12 +151,11 @@ for (const issue of waiting) {
     out(`#${number}: no Depends on #N lines, left for a human`);
     continue;
   }
-  const blocking = refs.filter((ref) => stateOf(ref) !== "closed");
+  const blocking = refs.filter((ref) => !stateOf(ref).done);
   if (blocking.length) {
     const describe = (ref) => {
-      const state = stateOf(ref);
-      if (state === "not-planned") return `#${ref} (closed as not planned)`;
-      return state === "unknown" ? `#${ref} (unknown)` : `#${ref}`;
+      const { note } = stateOf(ref);
+      return note ? `#${ref} (${note})` : `#${ref}`;
     };
     out(`#${number}: waiting on ${blocking.map(describe).join(", ")}`);
     continue;

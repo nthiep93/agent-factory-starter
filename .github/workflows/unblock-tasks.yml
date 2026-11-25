@@ -1,7 +1,9 @@
 name: Unblock tasks
 
-# When an issue closes, issues labeled `waiting-on-deps` whose "- Depends on #N"
-# issues are now all closed get `ready-for-agent` instead, plus a comment.
+# Issues labeled `waiting-on-deps` (risk:low or risk:medium) whose "- Depends on #N"
+# issues are all closed as completed get `ready-for-agent` instead, plus a comment.
+# Runs when an issue closes, when an issue gets `waiting-on-deps` (its deps may
+# already be closed at creation), and on demand from the Actions tab.
 #
 # This workflow never adds the `agent` label, for two reasons:
 #   - Labels added with GITHUB_TOKEN do not trigger other workflows, so it could
@@ -14,7 +16,8 @@ name: Unblock tasks
 
 on:
   issues:
-    types: [closed]
+    types: [closed, labeled]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -22,6 +25,10 @@ permissions:
 
 jobs:
   unblock:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.action == 'closed' ||
+      (github.event.action == 'labeled' && github.event.label.name == 'waiting-on-deps')
     # One run at a time so two closes in a row do not race on the same labels.
     concurrency:
       group: unblock-tasks
