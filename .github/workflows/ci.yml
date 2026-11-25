@@ -27,3 +27,56 @@ jobs:
       - run: pnpm format:check
       - run: pnpm verify
       - run: pnpm build
+
+  # Holdout acceptance scenarios (holdout/*.test.mjs) against real servers.
+  # They live outside the pnpm workspace, so `pnpm verify` never runs or shows
+  # them to a builder agent. On a PR these files come from the PR head:
+  # holdout/ is guarded by CODEOWNERS review and by the agents' deny rules
+  # (.claude/settings.json, protect-files.sh, claude.yml --disallowedTools),
+  # and the pr-risk classifier labels any holdout/ change risk:high, which is
+  # never auto-merged. See docs/gates.md.
+  holdout:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      API_URL: http://localhost:3001
+      WEB_URL: http://localhost:3000
+      # Second web server whose API points at a port where nothing listens.
+      WEB_DEAD_API_URL: http://localhost:3002
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+
+      - name: Start api and web
+        run: |
+          mkdir -p "$RUNNER_TEMP/logs"
+          PORT=3001 nohup node apps/api/dist/main.js > "$RUNNER_TEMP/logs/api.log" 2>&1 &
+          NEXT_PUBLIC_API_URL=http://localhost:3001 nohup pnpm --filter web exec next start --port 3000 > "$RUNNER_TEMP/logs/web.log" 2>&1 &
+          NEXT_PUBLIC_API_URL=http://localhost:3009 nohup pnpm --filter web exec next start --port 3002 > "$RUNNER_TEMP/logs/web-dead-api.log" 2>&1 &
+
+      - name: Wait for servers (max 60 s)
+        run: |
+          for url in "$API_URL/health" "$WEB_URL/" "$WEB_DEAD_API_URL/"; do
+            ok=false
+            for _ in $(seq 1 60); do
+              if curl -fsS -o /dev/null --max-time 5 "$url"; then ok=true; break; fi
+              sleep 1
+            done
+            if [ "$ok" != true ]; then echo "::error::$url did not come up"; exit 1; fi
+            echo "$url is up"
+          done
+
+      # Quoted glob: Node expands it. `node --test holdout/` (a directory) is
+      # not supported by Node 22.
+      - run: node --test 'holdout/*.test.mjs'
+
+      - name: Server logs
+        if: failure()
+        run: |
+          for f in "$RUNNER_TEMP"/logs/*.log; do echo "::group::$f"; cat "$f"; echo "::endgroup::"; done

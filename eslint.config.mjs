@@ -7,8 +7,16 @@ export default tseslint.config(
   },
   js.configs.recommended,
   {
-    files: ["scripts/**/*.mjs"],
-    languageOptions: { globals: { process: "readonly" } },
+    // Node scripts and holdout scenarios (node:test + fetch, no dependencies).
+    files: ["scripts/**/*.mjs", "holdout/**/*.mjs"],
+    languageOptions: {
+      globals: {
+        process: "readonly",
+        fetch: "readonly",
+        AbortSignal: "readonly",
+        URL: "readonly",
+      },
+    },
   },
   ...tseslint.configs.recommended,
   {
