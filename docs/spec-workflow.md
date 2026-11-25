@@ -9,7 +9,9 @@ node scripts/spec-to-issues.mjs   dry run: validate + in ra các issue theo th�
         |
 ... --create                      gh issue create theo thứ tự dependency
         |
-label `agent`                     workflow "Claude agent" chạy, push nhánh claude/...
+waiting-on-deps -> ready-for-agent workflow "Unblock tasks" khi các dependency đã close
+        |
+label `agent`                     người gắn; workflow "Claude agent" chạy, push nhánh claude/...
         |
 agent PR -> review -> merge
         |
@@ -27,12 +29,17 @@ node scripts/factory-metrics.mjs  merge rate, rework rate, thời gian merge / r
 
 2. **Review spec.** Anh đọc lại cả ba file. Đây là chỗ rẻ nhất để sửa hiểu lầm. Commit spec qua PR như code bình thường.
 3. **Dry run.** `node scripts/spec-to-issues.mjs specs/001-time-endpoint` in ra từng issue (thứ tự, title, labels, body). `#1..#N` trong dry run là số giả, đứng thay cho số issue thật.
-4. **Tạo issue.** `node scripts/spec-to-issues.mjs specs/001-time-endpoint --create` gọi `gh issue create` theo thứ tự dependency, lấy số issue thật từ URL mà `gh` in ra và dùng nó cho dòng `Depends on #N` của các task sau. Label còn thiếu (`risk:*`, `agent`) được tạo trước.
-5. **Label `agent`.** Issue có label `agent` sẽ kích hoạt workflow `Claude agent` (xem `.github/workflows/claude.yml`). Script chỉ gắn `agent` khi task sẵn sàng: risk không phải `high` VÀ mọi dependency đã có issue. Task `risk: high` không bao giờ được gắn `agent`.
-6. **Agent PR.** Agent push nhánh `claude/...`, anh mở PR, CI `verify` và `Claude review` chạy, anh review rồi merge.
-7. **Đo.** `node scripts/factory-metrics.mjs` định kỳ, xem phần định nghĩa bên dưới.
+4. **Tạo issue.** `node scripts/spec-to-issues.mjs specs/001-time-endpoint --create` gọi `gh issue create` theo thứ tự dependency, lấy số issue thật từ URL mà `gh` in ra và dùng nó cho dòng `Depends on #N` của các task sau. Label còn thiếu (`risk:*`, `agent`, `waiting-on-deps`, `ready-for-agent`) được tạo trước.
+5. **Label.** Mỗi issue luôn có `risk:<level>`, cộng thêm:
+   - `agent`: task `low`/`medium` **không có dependency**. Workflow `Claude agent` (`.github/workflows/claude.yml`) chạy ngay.
+   - `waiting-on-deps`: task `low`/`medium` **có dependency**. Mục Dependencies trong body ghi rõ điều kiện mở khoá.
+   - Không gì thêm: task `risk: high`. Body ghi rằng người phải tự làm, hoặc chủ động dispatch bằng cách gắn `agent` sau khi review. Không workflow nào tự động mở đường cho task high.
+6. **Mở khoá.** Khi một issue được close, workflow `Unblock tasks` (`.github/workflows/unblock-tasks.yml`) chạy `scripts/unblock-tasks.mjs`: với mỗi issue open có `waiting-on-deps`, nếu mọi issue trong các dòng `- Depends on #N` đều đã close (không tính close dạng "not planned"), nó gỡ `waiting-on-deps`, gắn `ready-for-agent` và comment "Dependencies #a, #b are closed. Add the `agent` label to start the agent." Issue còn dependency chưa có số (`Depends on T3 (no issue yet...)`) hoặc không có dòng `Depends on #N` nào thì giữ nguyên.
+7. **Dispatch.** Anh xem các issue `ready-for-agent` (code nền vừa thay đổi, nên đọc lại spec cho chắc) rồi gắn `agent`.
+8. **Agent PR.** Agent push nhánh `claude/...`, anh mở PR, CI `verify` và `Claude review` chạy, anh review rồi merge. Close issue khi merge (ví dụ `Closes #N` trong PR) để các task sau được mở khoá.
+9. **Đo.** `node scripts/factory-metrics.mjs` định kỳ, xem phần định nghĩa bên dưới.
 
-> **Lưu ý về thứ tự.** Khi `--create` chạy một lượt, dependency luôn được tạo trước, nên mọi task không phải `high` đều nhận `agent` ngay. GitHub sẽ chạy agent cho T2 song song với T1, trước khi code của T1 được merge. Với chuỗi task phụ thuộc chặt (T2 cần code của T1), hãy gỡ label `agent` khỏi task sau ngay khi tạo xong, và gắn lại khi PR của dependency đã merge.
+> **Vì sao workflow không tự gắn `agent`?** Label gắn bằng `GITHUB_TOKEN` không kích hoạt workflow khác, nên `Unblock tasks` có gắn `agent` thì `claude.yml` cũng không chạy. Hơn nữa, để người dispatch giữ được cổng kiểm soát: mỗi task chỉ chạy khi có người quyết định. Body của issue là dữ liệu không tin cậy: script chỉ đọc số issue từ đó, không bao giờ đưa vào shell.
 
 ## Format `tasks.md`
 
@@ -116,6 +123,7 @@ Median là giá trị giữa (trung bình hai giá trị giữa khi số phần 
 pnpm build --filter @repo/factory                               # script dùng bản compiled trong dist/
 node scripts/spec-to-issues.mjs specs/001-time-endpoint         # dry run, exit 1 nếu tasks.md sai
 node scripts/spec-to-issues.mjs specs/001-time-endpoint --create
+node scripts/unblock-tasks.mjs --dry-run                         # xem issue nào sẽ được mở khoá
 node scripts/factory-metrics.mjs                                # gh pr list --state all --limit 200
 node scripts/factory-metrics.mjs --days 30
 node scripts/factory-metrics.mjs --input prs.json --json        # file đã lưu, in JSON thô
@@ -123,6 +131,6 @@ node scripts/factory-metrics.mjs --input prs.json --days 7 --now 2026-11-25T00:0
 gh pr list --state all --limit 200 --json number,headRefName,state,createdAt,mergedAt,closedAt,author,commits,reviews,labels,additions,deletions > prs.json
 ```
 
-`spec-to-issues.mjs` exit `1` khi validate lỗi (in `tasks.md:<line>: <message>`) hoặc `gh` lỗi (in các issue đã tạo được), exit `2` khi sai tham số. Test end to end của hai script dùng một `gh` giả đặt đầu `PATH`, không gọi GitHub thật.
+`spec-to-issues.mjs` exit `1` khi validate lỗi (in `tasks.md:<line>: <message>`) hoặc `gh` lỗi (in các issue đã tạo được), exit `2` khi sai tham số. `unblock-tasks.mjs` exit `1` nếu có issue không sửa label hoặc comment được (vẫn xử lý các issue khác). Test end to end của các script dùng một `gh` giả đặt đầu `PATH`, không gọi GitHub thật.
 
 Ví dụ đầy đủ: `specs/001-time-endpoint/`.

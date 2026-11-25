@@ -54,7 +54,8 @@ You write the spec only. Do not change application code, and never run `spec-to-
    - Each task is one PR that one agent run can finish: usually one area, at most about 5 acceptance criteria, no "and also" goals. Split anything bigger.
    - Shared contracts first (`area: shared`), then `api`, then `web`. Every task lists the tasks whose code it needs in `depends`; no cycles.
    - Each acceptance bullet must be checkable by a test the agent writes. Copy concrete values (inputs, outputs, status codes) from the spec rather than restating it vaguely.
-   - `risk: high` for auth, data migrations, money, security or anything irreversible. High-risk tasks never get the `agent` label; a human does them or labels them later.
+   - `risk: high` for auth, data migrations, money, security or anything irreversible. High-risk tasks never get the `agent` label or any automatic path to it; a human implements them or dispatches them explicitly.
+   - Labels follow from the task: no `depends` and low/medium risk gets `agent` (starts immediately); with `depends` it gets `waiting-on-deps`, and the unblock-tasks workflow swaps that for `ready-for-agent` once every dependency issue is closed, so a human can add `agent`. Only list a dependency when the task really needs that code merged first; unnecessary dependencies delay dispatch.
    - Together, the tasks must cover every acceptance criterion in spec.md. Leave nothing to a "final cleanup" task.
 
 7. **Validate.** Run `pnpm build --filter @repo/factory`, then `node scripts/spec-to-issues.mjs specs/<NNN>-<slug>` (dry run). Fix every reported line in `tasks.md` and run again until it exits 0. Read the printed issues once as if you were the agent: if one could not be done from its body plus spec.md and plan.md, rewrite it.

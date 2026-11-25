@@ -32,7 +32,9 @@ export function buildFactory() {
 }
 
 // Fake gh: records each call's args (one per line) and the --body-file content,
-// answers `label list` from $FAKE_GH_LABELS and `pr list` from $FAKE_GH_PRS,
+// answers `label list` from $FAKE_GH_LABELS, `pr list` from the file $FAKE_GH_PRS,
+// `issue list` from the file $FAKE_GH_ISSUES and `issue view <n>` from
+// $FAKE_GH_STATES/<n>.json; `issue edit|comment <n>` fails when n = $FAKE_GH_FAIL_EDIT,
 // and prints https://github.com/o/r/issues/<n> with n = 101, 102, ...
 // $FAKE_GH_FAIL_AT=<n> makes the issue create that would get number n fail.
 const GH_STUB = `#!/usr/bin/env bash
@@ -41,16 +43,25 @@ d="$FAKE_GH_DIR"
 k=$(( $(cat "$d/count" 2>/dev/null || echo 0) + 1 ))
 echo "$k" > "$d/count"
 printf '%s\\n' "$@" > "$d/call-$k.args"
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "--body-file" ]; then cp "$a" "$d/call-$k.body"; fi
+  prev="$a"
+done
 case "\${1:-} \${2:-}" in
   "label list") echo "\${FAKE_GH_LABELS:-[]}" ;;
   "label create") ;;
   "pr list") cat "$FAKE_GH_PRS" ;;
+  "issue list") cat "$FAKE_GH_ISSUES" ;;
+  "issue view")
+    f="$FAKE_GH_STATES/\${3:-}.json"
+    if [ ! -f "$f" ]; then echo "GraphQL: Could not resolve to an issue (\${3:-})" >&2; exit 1; fi
+    cat "$f"
+    ;;
+  "issue edit" | "issue comment")
+    if [ "\${FAKE_GH_FAIL_EDIT:-}" = "\${3:-}" ]; then echo "HTTP 403: forbidden" >&2; exit 1; fi
+    ;;
   "issue create")
-    prev=""
-    for a in "$@"; do
-      if [ "$prev" = "--body-file" ]; then cp "$a" "$d/call-$k.body"; fi
-      prev="$a"
-    done
     n=$(( $(cat "$d/issue" 2>/dev/null || echo 100) + 1 ))
     echo "$n" > "$d/issue"
     if [ "\${FAKE_GH_FAIL_AT:-}" = "$n" ]; then echo "HTTP 502: Bad Gateway" >&2; exit 1; fi
