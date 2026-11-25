@@ -3,6 +3,7 @@ import {
   computeFactoryMetrics,
   isAgentPr,
   isReworked,
+  linkedIssueNumbers,
   median,
   percentile,
   riskOf,
@@ -72,6 +73,57 @@ describe("riskOf", () => {
   });
 });
 
+describe("linkedIssueNumbers", () => {
+  it("reads closing issue references and issue-<n> branch names", () => {
+    expect(
+      linkedIssueNumbers(
+        pr({
+          headRefName: "claude/issue-12-20261101-0930",
+          closingIssuesReferences: [
+            { number: 12, url: "https://github.com/o/r/issues/12" },
+            { number: 30, url: "https://github.com/o/r/issues/30" },
+            { number: 31, url: "https://github.com/o/r/pull/31" },
+          ],
+        }),
+      ),
+    ).toEqual([12, 30]);
+    expect(linkedIssueNumbers(pr({ headRefName: "agent/issue-7" }))).toEqual([7]);
+    expect(linkedIssueNumbers(pr({ headRefName: "agent/issue-7x" }))).toEqual([]);
+    expect(linkedIssueNumbers(pr({ headRefName: "claude/fix-issue-7-thing" }))).toEqual([]);
+  });
+});
+
+describe("riskOf with issue labels", () => {
+  const issueLabels = { 12: ["risk:medium", "agent"], 13: ["risk:high"], 14: ["bug"] };
+
+  it("takes the risk from the linked issue, not the PR", () => {
+    const linked = pr({ headRefName: "claude/issue-12-x", labels: [{ name: "risk:low" }] });
+    expect(riskOf(linked, issueLabels)).toBe("medium");
+  });
+
+  it("uses the highest risk across several linked issues", () => {
+    const linked = pr({
+      headRefName: "claude/issue-12-x",
+      closingIssuesReferences: [{ number: 13, url: "https://github.com/o/r/issues/13" }],
+    });
+    expect(riskOf(linked, issueLabels)).toBe("high");
+  });
+
+  it("falls back to PR labels when no linked issue has a risk label", () => {
+    expect(riskOf(pr({ headRefName: "claude/issue-14-x" }), issueLabels)).toBe("low");
+    expect(riskOf(pr({ headRefName: "claude/issue-99-x" }), issueLabels)).toBe("low");
+    expect(riskOf(pr({ headRefName: "claude/issue-12-x" }))).toBe("low");
+  });
+
+  it("feeds the per-risk breakdown", () => {
+    const metrics = computeFactoryMetrics([pr({ headRefName: "claude/issue-13-x" })], NOW, {
+      issueLabels,
+    });
+    expect(metrics.byRisk.high.total).toBe(1);
+    expect(metrics.byRisk.low.total).toBe(0);
+  });
+});
+
 describe("isReworked", () => {
   it("is false for an untouched merged agent PR", () => {
     expect(isReworked(pr())).toBe(false);
@@ -118,6 +170,48 @@ describe("isReworked", () => {
     ];
     expect(isReworked(pr({ commits }), ["my-runner"])).toBe(false);
     expect(isReworked(pr({ commits }))).toBe(true);
+  });
+
+  it("ignores reviews by bots and by the PR author", () => {
+    const reviews = [
+      { state: "CHANGES_REQUESTED", submittedAt: at(1), author: { login: "claude[bot]" } },
+      { state: "CHANGES_REQUESTED", submittedAt: at(1), author: { login: "claude" } },
+      { state: "CHANGES_REQUESTED", submittedAt: at(1), author: { login: "", is_bot: true } },
+      { state: "CHANGES_REQUESTED", submittedAt: at(1), author: { login: "NThiep93" } },
+      { state: "COMMENTED", submittedAt: at(0.1), author: { login: "nthiep93" } },
+    ];
+    const commits = [BOT_COMMIT];
+    expect(isReworked(pr({ reviews, commits }))).toBe(false);
+    expect(
+      isReworked(
+        pr({
+          reviews: [
+            ...reviews,
+            { state: "CHANGES_REQUESTED", submittedAt: at(1), author: { login: "rev" } },
+          ],
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("skips merge and update-branch commits", () => {
+    const reviews = [{ state: "COMMENTED", submittedAt: at(1), author: { login: "rev" } }];
+    const merges = [
+      "Merge branch 'main' into claude/issue-1",
+      "Merge remote-tracking branch 'origin/main' into claude/issue-1",
+      "Merge pull request #4 from o/r",
+    ].map((messageHeadline) => ({
+      messageHeadline,
+      committedDate: at(1.5),
+      authors: [{ login: "nthiep93" }],
+    }));
+    expect(isReworked(pr({ reviews, commits: [BOT_COMMIT, ...merges] }))).toBe(false);
+    const fix = {
+      messageHeadline: "Merge sort fix",
+      committedDate: at(1.5),
+      authors: [{ login: "" }],
+    };
+    expect(isReworked(pr({ reviews, commits: [BOT_COMMIT, fix] }))).toBe(true);
   });
 
   it("does not apply the human-commit rule to agent/ branches (local runs commit as the human)", () => {
@@ -229,6 +323,16 @@ describe("computeFactoryMetrics", () => {
         reworkRate: 0,
       },
     });
+  });
+
+  it("ignores bot and author reviews for time to first review", () => {
+    const reviews = [
+      { state: "COMMENTED", submittedAt: at(0.1), author: { login: "github-actions[bot]" } },
+      { state: "COMMENTED", submittedAt: at(0.2), author: { login: "nthiep93" } },
+      { state: "APPROVED", submittedAt: at(5), author: { login: "rev" } },
+    ];
+    const metrics = computeFactoryMetrics([pr({ mergedAt: at(6), reviews })], NOW);
+    expect(metrics.timeToFirstReview).toEqual({ count: 1, medianMs: 5 * HOUR });
   });
 
   it("treats a PR with mergedAt as merged even if state says CLOSED", () => {

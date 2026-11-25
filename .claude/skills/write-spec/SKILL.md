@@ -48,6 +48,7 @@ You write the spec only. Do not change application code, and never run `spec-to-
    - One `## T<n>: <title>` heading per task. Ids are `T` plus a number and unique. The title becomes the issue title after `[agent] `.
    - Required keys: `goal`, `area` (`api` | `web` | `shared` | `docs` | `infra`), `risk` (`low` | `medium` | `high`), `depends` (`none` or a comma list like `T1, T2`). Optional: `in-scope`, `out-of-scope`. Keys are one line each; no other keys.
    - `Acceptance:` on its own line, then one `- ` bullet per criterion (at least one). Indent a line by two spaces to continue the previous bullet.
+   - Never write `@claude` anywhere in tasks.md: `claude.yml` starts the agent when a new issue mentions it, bypassing the risk and dependency labels, so the validator rejects it.
    - Text before the first `##` heading is ignored. Inside a task, only keys, bullets and blank lines are allowed. Blank lines are fine anywhere (Prettier adds some after headings and `Acceptance:`).
 
    Sizing and ordering:

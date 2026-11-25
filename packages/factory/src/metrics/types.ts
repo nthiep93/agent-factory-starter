@@ -16,6 +16,7 @@ export interface GhCommitAuthor {
 
 export interface GhCommit {
   oid?: string;
+  messageHeadline?: string;
   authoredDate?: string;
   committedDate?: string;
   authors?: GhCommitAuthor[];
@@ -32,6 +33,12 @@ export interface GhLabel {
   name: string;
 }
 
+/** An issue the PR closes when merged. gh does not return its labels. */
+export interface GhIssueRef {
+  number: number;
+  url?: string;
+}
+
 export interface GhPullRequest {
   number: number;
   headRefName: string;
@@ -44,6 +51,7 @@ export interface GhPullRequest {
   commits?: GhCommit[];
   reviews?: GhReview[];
   labels?: GhLabel[];
+  closingIssuesReferences?: GhIssueRef[];
   additions?: number;
   deletions?: number;
 }
@@ -60,6 +68,7 @@ export const GH_PR_FIELDS = [
   "commits",
   "reviews",
   "labels",
+  "closingIssuesReferences",
   "additions",
   "deletions",
 ] as const;
@@ -93,6 +102,11 @@ export interface FactoryMetrics extends OutcomeCounts {
 export interface MetricsOptions {
   /** Only count PRs created in the last N days before `now`. */
   sinceDays?: number;
-  /** Extra commit-author logins to treat as bots (case-insensitive). */
+  /** Extra commit-author and reviewer logins to treat as bots (case-insensitive). */
   botLogins?: readonly string[];
+  /**
+   * Label names per issue number (from `gh issue list --json number,labels`).
+   * Risk comes from the issue a PR is linked to; PR labels are the fallback.
+   */
+  issueLabels?: Readonly<Record<number, readonly string[]>>;
 }

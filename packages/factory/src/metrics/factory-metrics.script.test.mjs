@@ -135,26 +135,59 @@ describe("factory-metrics --input", () => {
   });
 });
 
+const FIELDS =
+  "number,headRefName,state,createdAt,mergedAt,closedAt,author,commits,reviews,labels,closingIssuesReferences,additions,deletions";
+
+describe("factory-metrics --issues", () => {
+  it("takes the per-risk breakdown from the linked issues' labels", () => {
+    // #11 is on claude/issue-3-..., and issue 3 is risk:high; its PR label says risk:low.
+    const issues = writeJson([{ number: 3, labels: [{ name: "risk:high" }] }]);
+    const { status, stdout } = run(["--input", writeJson(FIXTURE), "--issues", issues]);
+    expect(status).toBe(0);
+    expect(stdout).toMatch(/ {2}high +1 +1 +0 +0 +100% +0%\n/);
+    expect(stdout).toMatch(/ {2}low +1 +0 +1 +0 +0% +n\/a\n/);
+  });
+});
+
 describe("factory-metrics without --input", () => {
-  it("asks gh for all PRs with the documented fields", () => {
+  it("asks gh for all PRs and issue labels with the documented fields", () => {
     const gh = fakeGh();
-    const { status, stdout } = run([], { gh, env: { FAKE_GH_PRS: writeJson(FIXTURE) } });
+    const env = { FAKE_GH_PRS: writeJson(FIXTURE), FAKE_GH_ISSUES: writeJson([]) };
+    const { status, stdout, stderr } = run([], { gh, env });
+    expect(stderr).toBe("");
     expect(status).toBe(0);
     expect(stdout).toContain("all fetched: 3");
-    expect(gh.readCalls()).toEqual([
-      {
-        args: [
-          "pr",
-          "list",
-          "--state",
-          "all",
-          "--limit",
-          "200",
-          "--json",
-          "number,headRefName,state,createdAt,mergedAt,closedAt,author,commits,reviews,labels,additions,deletions",
-        ],
-        body: null,
-      },
+    expect(gh.readCalls().map((c) => c.args)).toEqual([
+      ["pr", "list", "--state", "all", "--limit", "200", "--json", FIELDS],
+      ["issue", "list", "--state", "all", "--limit", "500", "--json", "number,labels"],
     ]);
+  });
+
+  it("narrows the gh search with --days and warns when the limit is hit", () => {
+    const gh = fakeGh();
+    const many = Array.from({ length: 200 }, (_, i) => ({
+      ...FIXTURE[0],
+      number: 1000 + i,
+      createdAt: H(10),
+    }));
+    const env = { FAKE_GH_PRS: writeJson(many), FAKE_GH_ISSUES: writeJson([]) };
+    const { status, stdout, stderr } = run(["--days", "3", "--now", H(48)], { gh, env });
+    expect(status).toBe(0);
+    expect(stdout).toContain("last 3 days: 200");
+    expect(gh.readCalls()[0].args).toEqual([
+      "pr",
+      "list",
+      "--state",
+      "all",
+      "--limit",
+      "200",
+      "--search",
+      "created:>=2026-10-31",
+      "--json",
+      FIELDS,
+    ]);
+    expect(stderr).toContain(
+      "Warning: gh returned exactly 200 PRs (the --limit); older PRs may be missing. Use a smaller --days.",
+    );
   });
 });

@@ -1,7 +1,9 @@
 import {
   RISK_BUCKETS,
   type FactoryMetrics,
+  type GhCommit,
   type GhCommitAuthor,
+  type GhReview,
   type GhPullRequest,
   type MetricsOptions,
   type OutcomeCounts,
@@ -56,20 +58,74 @@ export const isAgentPr = (pr: GhPullRequest): boolean =>
 
 const isMerged = (pr: GhPullRequest): boolean => pr.state === "MERGED" || Boolean(pr.mergedAt);
 
-/** Highest `risk:<level>` label on the PR, or `unlabeled`. */
-export function riskOf(pr: GhPullRequest): RiskBucket {
+const ISSUE_BRANCH = /^(?:claude|agent)\/issue-(\d+)(?:-|$)/;
+
+/**
+ * Issues the PR belongs to: its closing issue references (issues only, not
+ * PRs) plus the number in a `claude/issue-<n>-...` or `agent/issue-<n>` branch.
+ */
+export function linkedIssueNumbers(pr: GhPullRequest): number[] {
+  const numbers: number[] = [];
+  const add = (n: number) => {
+    if (Number.isSafeInteger(n) && n > 0 && !numbers.includes(n)) numbers.push(n);
+  };
+  const fromBranch = ISSUE_BRANCH.exec(pr.headRefName ?? "");
+  if (fromBranch) add(Number(fromBranch[1]));
+  for (const ref of pr.closingIssuesReferences ?? []) {
+    if (ref.url === undefined || ref.url.includes("/issues/")) add(ref.number);
+  }
+  return numbers;
+}
+
+const highestRisk = (names: readonly string[]): RiskBucket => {
   let risk: RiskBucket = "unlabeled";
-  for (const label of pr.labels ?? []) {
-    const level = label.name.startsWith("risk:") ? label.name.slice(5) : "";
+  for (const name of names) {
+    const level = name.startsWith("risk:") ? name.slice(5) : "";
     const bucket = RISK_BUCKETS.find((b) => b === level && b !== "unlabeled");
     if (bucket && RISK_RANK[bucket] > RISK_RANK[risk]) risk = bucket;
   }
   return risk;
+};
+
+/**
+ * Risk of a PR: the highest `risk:<level>` label on its linked issues (where
+ * the factory puts them), else the highest on the PR itself, else `unlabeled`.
+ */
+export function riskOf(
+  pr: GhPullRequest,
+  issueLabels: Readonly<Record<number, readonly string[]>> = {},
+): RiskBucket {
+  const fromIssues = highestRisk(linkedIssueNumbers(pr).flatMap((n) => issueLabels[n] ?? []));
+  if (fromIssues !== "unlabeled") return fromIssues;
+  return highestRisk((pr.labels ?? []).map((label) => label.name));
 }
 
-const firstReviewAt = (pr: GhPullRequest): number | null => {
-  const times = (pr.reviews ?? [])
-    .filter((review) => review.state !== "PENDING")
+const botSet = (extra: readonly string[]) =>
+  new Set([...DEFAULT_BOT_LOGINS, ...extra].map((login) => login.toLowerCase()));
+
+const isBotLogin = (login: string | undefined, bots: ReadonlySet<string>): boolean => {
+  const name = (login ?? "").trim().toLowerCase();
+  return name === "" || name.endsWith("[bot]") || bots.has(name);
+};
+
+/** Reviews that count: submitted, by a human other than the PR author. */
+const humanReviews = (pr: GhPullRequest, bots: ReadonlySet<string>): GhReview[] => {
+  const prAuthor = (pr.author?.login ?? "").trim().toLowerCase();
+  return (pr.reviews ?? []).filter((review) => {
+    if (review.state === "PENDING") return false;
+    const login = review.author?.login;
+    if (review.author?.is_bot || isBotLogin(login, bots)) return false;
+    return (login ?? "").trim().toLowerCase() !== prAuthor;
+  });
+};
+
+/** "Update branch" and other merge commits bring in main; they are not rework. */
+const MERGE_COMMIT = /^Merge (branch|remote-tracking branch|pull request) /;
+const isMergeCommit = (commit: GhCommit): boolean =>
+  MERGE_COMMIT.test(commit.messageHeadline ?? "");
+
+const firstReviewAt = (pr: GhPullRequest, bots: ReadonlySet<string>): number | null => {
+  const times = humanReviews(pr, bots)
     .map((review) => time(review.submittedAt))
     .filter((ms): ms is number => ms !== null);
   return times.length > 0 ? Math.min(...times) : null;
@@ -83,15 +139,19 @@ const firstReviewAt = (pr: GhPullRequest): number | null => {
  * 3. on a `claude/` branch, a commit whose authors are all humans (someone pushed
  *    a fix by hand). Not applied to `agent/` branches: local runs commit under
  *    the human's own git identity, so authorship cannot tell agent from human.
- * A commit author is a bot when its login is empty (apps have no user), ends in
- * `[bot]`, or is in DEFAULT_BOT_LOGINS or `botLogins` (case-insensitive).
+ * Only reviews by humans other than the PR author count (rules 1 and 2), and
+ * merge commits ("Merge branch ...", "Merge remote-tracking branch ...",
+ * "Merge pull request ...", e.g. from Update branch) are skipped (rules 2 and 3).
+ * A login is a bot when it is empty (apps have no user), ends in `[bot]`, or is
+ * in DEFAULT_BOT_LOGINS or `botLogins` (case-insensitive).
  */
 export function isReworked(pr: GhPullRequest, botLogins: readonly string[] = []): boolean {
   if (!isMerged(pr)) return false;
-  if ((pr.reviews ?? []).some((review) => review.state === "CHANGES_REQUESTED")) return true;
+  const bots = botSet(botLogins);
+  if (humanReviews(pr, bots).some((review) => review.state === "CHANGES_REQUESTED")) return true;
 
-  const commits = pr.commits ?? [];
-  const reviewedAt = firstReviewAt(pr);
+  const commits = (pr.commits ?? []).filter((commit) => !isMergeCommit(commit));
+  const reviewedAt = firstReviewAt(pr, bots);
   if (reviewedAt !== null) {
     const afterReview = commits.some((commit) => {
       const committed = time(commit.committedDate) ?? time(commit.authoredDate);
@@ -101,11 +161,7 @@ export function isReworked(pr: GhPullRequest, botLogins: readonly string[] = [])
   }
 
   if ((pr.headRefName ?? "").startsWith("claude/")) {
-    const bots = new Set([...DEFAULT_BOT_LOGINS, ...botLogins].map((l) => l.toLowerCase()));
-    const isHuman = (author: GhCommitAuthor) => {
-      const login = (author.login ?? "").trim().toLowerCase();
-      return login !== "" && !login.endsWith("[bot]") && !bots.has(login);
-    };
+    const isHuman = (author: GhCommitAuthor) => !isBotLogin(author.login, bots);
     const humanOnly = commits.some(
       (commit) => (commit.authors ?? []).length > 0 && (commit.authors ?? []).every(isHuman),
     );
@@ -163,7 +219,7 @@ export function computeFactoryMetrics(
     if (created === null) continue;
     const merged = isMerged(pr) ? time(pr.mergedAt) : null;
     if (merged !== null && merged >= created) mergeDurations.push(merged - created);
-    const reviewed = firstReviewAt(pr);
+    const reviewed = firstReviewAt(pr, botSet(options.botLogins ?? []));
     if (reviewed !== null && reviewed >= created) reviewDurations.push(reviewed - created);
   }
 
@@ -171,7 +227,7 @@ export function computeFactoryMetrics(
     RISK_BUCKETS.map((bucket) => [
       bucket,
       countOutcomes(
-        agentPrs.filter((pr) => riskOf(pr) === bucket),
+        agentPrs.filter((pr) => riskOf(pr, options.issueLabels) === bucket),
         reworked,
       ),
     ]),

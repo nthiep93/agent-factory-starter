@@ -5,6 +5,7 @@ export {
   computeFactoryMetrics,
   isAgentPr,
   isReworked,
+  linkedIssueNumbers,
   median,
   percentile,
   riskOf,
