@@ -1,0 +1,127 @@
+name: PR risk
+
+# Labels every PR risk:low / risk:medium / risk:high (rules: docs/gates.md,
+# code: packages/factory/src/risk) and, only when explicitly enabled, turns on
+# auto-merge for low-risk PRs from Claude's claude/* branches.
+#
+# SECURITY
+# - Trigger is pull_request_target, not pull_request. With pull_request the
+#   workflow file itself is taken from the PR, so a PR could edit this file to
+#   label itself low. pull_request_target always runs this file from the base
+#   branch.
+# - pull_request_target has a write token, so this workflow must NEVER check
+#   out or run code from the PR head. The classifier is checked out at
+#   github.event.pull_request.base.sha; the PR is only read through the API
+#   (its file list), as data.
+# - Head branch names are attacker-controlled text: they are passed through
+#   env, never interpolated into a script.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: pr-risk-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  risk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    outputs:
+      level: ${{ steps.classify.outputs.level }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+    steps:
+      - name: Check out the classifier from the BASE commit (never the PR head)
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build --filter @repo/factory
+
+      - name: Classify changed files
+        id: classify
+        run: |
+          gh api --paginate --slurp "repos/$GH_REPO/pulls/$PR_NUMBER/files" > "$RUNNER_TEMP/files.json"
+          node scripts/classify-pr.mjs "$RUNNER_TEMP/files.json" > "$RUNNER_TEMP/risk.txt"
+          level="$(head -n 1 "$RUNNER_TEMP/risk.txt")"
+          case "$level" in low|medium|high) ;; *) echo "::error::unexpected level '$level'"; exit 1 ;; esac
+          echo "level=$level" >> "$GITHUB_OUTPUT"
+          {
+            echo "### PR risk: \`$level\`"
+            echo
+            tail -n +2 "$RUNNER_TEMP/risk.txt" | sed 's/^/- /'
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat "$RUNNER_TEMP/risk.txt"
+
+      - name: Set exactly one risk label
+        env:
+          LEVEL: ${{ steps.classify.outputs.level }}
+        run: |
+          gh label create risk:low --color 0e8a16 --description "Docs/tests only, small" --force
+          gh label create risk:medium --color fbca04 --description "App source, deps or shared contract" --force
+          gh label create risk:high --color b60205 --description "Guardrails, sensitive area, deleted tests or very large" --force
+          for other in low medium high; do
+            [ "$other" = "$LEVEL" ] && continue
+            # 404 when the label is not on the PR; that is fine.
+            gh api -X DELETE "repos/$GH_REPO/issues/$PR_NUMBER/labels/risk%3A$other" > /dev/null 2>&1 || true
+          done
+          gh api -X POST "repos/$GH_REPO/issues/$PR_NUMBER/labels" -f "labels[]=risk:$LEVEL" > /dev/null
+
+      # A new push can change the level. If it is no longer low, switch off any
+      # auto-merge an earlier low run enabled. This job (about a minute) beats
+      # the required verify + holdout checks in practice, but that is timing,
+      # not a guarantee; see "Giới hạn" in docs/gates.md.
+      - name: Disable auto-merge unless low
+        if: steps.classify.outputs.level != 'low' && github.event.pull_request.auto_merge != null
+        run: gh pr merge --disable-auto "$PR_NUMBER"
+
+  auto-merge:
+    # Off by default. All of these must hold:
+    # - the classifier says low,
+    # - the repo variable AUTO_MERGE_LOW_RISK is exactly 'true',
+    # - the branch is a claude/* branch in this repo (not a fork), PR not draft.
+    needs: risk
+    if: >-
+      needs.risk.outputs.level == 'low' &&
+      vars.AUTO_MERGE_LOW_RISK == 'true' &&
+      startsWith(github.event.pull_request.head.ref, 'claude/') &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      # Requires the repo setting "Allow auto-merge" (Settings > General).
+      # Auto-merge still waits for every required status check and review
+      # rule on main (verify, holdout, ...); it only removes the click.
+      # --match-head-commit ties it to the commit that was classified: if the
+      # head moved after classification, enabling fails instead of approving
+      # unclassified commits. Later pushes are handled by the step above.
+      # A merge made with GITHUB_TOKEN does not trigger other workflows (no CI
+      # run on the push to main). Vercel deploys through its own GitHub App, so
+      # production still deploys.
+      - name: Enable auto-merge
+        run: gh pr merge --auto --merge --match-head-commit "$HEAD_SHA" "$PR_NUMBER"
