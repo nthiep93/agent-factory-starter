@@ -3,7 +3,15 @@ import tseslint from "typescript-eslint";
 
 export default tseslint.config(
   {
-    ignores: ["**/dist/**", "**/.next/**", "**/node_modules/**", "**/next-env.d.ts", ".turbo/**"],
+    // holdout/ is hidden from agents' lint; CI lints it with --no-ignore in the holdout job.
+    ignores: [
+      "**/dist/**",
+      "**/.next/**",
+      "**/node_modules/**",
+      "**/next-env.d.ts",
+      ".turbo/**",
+      "holdout/**",
+    ],
   },
   js.configs.recommended,
   {

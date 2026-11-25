@@ -3,3 +3,5 @@ dist
 .next
 .turbo
 pnpm-lock.yaml
+# Hidden from agents' format runs (see docs/gates.md)
+holdout

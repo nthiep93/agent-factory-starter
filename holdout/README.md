@@ -5,8 +5,9 @@ End-to-end acceptance scenarios that coding agents must not see or edit. They ex
 ## Who can see and change them
 
 - Agents are denied `Read` and `Edit` here in `.claude/settings.json`, the `protect-files.sh` hook blocks writes, and `claude.yml` passes `--disallowedTools` for `holdout/**`.
-- The folder is not part of the pnpm workspace and `pnpm verify` never runs it, so a builder running verify sees nothing from here.
-- Changes need a human: `CODEOWNERS` requires the owner's review, and the `PR risk` workflow labels any change under `holdout/` as `risk:high`, which is never auto-merged.
+- The folder is not part of the pnpm workspace and is in eslint's ignores and `.prettierignore`, so `pnpm verify` and `pnpm format` never run, print or touch it. CI lints it only inside the `holdout` job (`eslint --no-ignore holdout/`).
+- On a PR, CI replaces `holdout/` with the copy from the PR's base commit before running it, so a PR cannot weaken the scenarios it is judged by. A change here only takes effect once a human has merged it.
+- The `PR risk` workflow labels any change under `holdout/` as `risk:high`, which is never auto-merged, so a human must merge it. (`CODEOWNERS` lists this folder, but in a one-person repo without "Require review from Code Owners" it enforces nothing.)
 
 ## What is covered
 
@@ -24,15 +25,17 @@ Scenarios use only Node 22 built-ins (`node:test`, `fetch`), no dependencies.
 
 ## Running
 
-Environment: `API_URL` and `WEB_URL` (required), `WEB_DEAD_API_URL` (a web server whose `NEXT_PUBLIC_API_URL` points at a port with nothing listening; the scenario is reported as skipped when unset).
+Environment: `API_URL` and `WEB_URL` (required), `WEB_DEAD_API_URL` (a web server whose `API_URL` points at a port with nothing listening; skipped when unset, but a failure when the `CI` env var is set).
 
 ```bash
 pnpm build
 PORT=3001 node apps/api/dist/main.js &
-NEXT_PUBLIC_API_URL=http://localhost:3001 pnpm --filter web exec next start --port 3000 &
-NEXT_PUBLIC_API_URL=http://localhost:3009 pnpm --filter web exec next start --port 3002 &
+API_URL=http://localhost:3001 pnpm --filter web exec next start --port 3000 &
+API_URL=http://localhost:3009 pnpm --filter web exec next start --port 3002 &
 API_URL=http://localhost:3001 WEB_URL=http://localhost:3000 WEB_DEAD_API_URL=http://localhost:3002 \
   node --test 'holdout/*.test.mjs'
 ```
+
+The web servers take the API from the run-time `API_URL` variable: `NEXT_PUBLIC_API_URL` is inlined by `next build` when it is set at build time, so it cannot be changed at `next start`.
 
 Keep the glob quoted: Node expands it, and Node 22 does not accept a directory (`node --test holdout/`). In CI the `holdout` job in `.github/workflows/ci.yml` does exactly this.

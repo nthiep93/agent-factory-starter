@@ -29,12 +29,13 @@ jobs:
       - run: pnpm build
 
   # Holdout acceptance scenarios (holdout/*.test.mjs) against real servers.
-  # They live outside the pnpm workspace, so `pnpm verify` never runs or shows
-  # them to a builder agent. On a PR these files come from the PR head:
-  # holdout/ is guarded by CODEOWNERS review and by the agents' deny rules
-  # (.claude/settings.json, protect-files.sh, claude.yml --disallowedTools),
-  # and the pr-risk classifier labels any holdout/ change risk:high, which is
-  # never auto-merged. See docs/gates.md.
+  # They live outside the pnpm workspace and are ignored by eslint/prettier, so
+  # `pnpm verify` and `pnpm format` never run or show them to a builder agent.
+  # On a PR, holdout/ is replaced by the copy from the BASE commit, so a PR
+  # cannot weaken the scenarios it is judged by; a holdout change only takes
+  # effect after a human merges it. The pr-risk classifier labels any holdout/
+  # change risk:high (never auto-merged), and agents are denied read/write on
+  # it (.claude/settings.json, protect-files.sh, claude.yml). See docs/gates.md.
   holdout:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -45,20 +46,36 @@ jobs:
       WEB_DEAD_API_URL: http://localhost:3002
     steps:
       - uses: actions/checkout@v6
+
+      - name: Use holdout/ from the base commit
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git fetch --depth=1 origin "$BASE_SHA"
+          # rm first: files the PR added under holdout/ must not survive.
+          rm -rf holdout
+          git checkout "$BASE_SHA" -- holdout/ || mkdir holdout   # base without holdout/
+          git status --short holdout/
+
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # holdout/ is in eslint's ignores (agents run lint); lint it only here.
+      - run: pnpm exec eslint --no-ignore --no-error-on-unmatched-pattern --max-warnings 0 holdout/
       - run: pnpm build
 
+      # The web servers get the API through the run-time API_URL variable:
+      # NEXT_PUBLIC_API_URL is inlined at build time when set then.
       - name: Start api and web
         run: |
           mkdir -p "$RUNNER_TEMP/logs"
           PORT=3001 nohup node apps/api/dist/main.js > "$RUNNER_TEMP/logs/api.log" 2>&1 &
-          NEXT_PUBLIC_API_URL=http://localhost:3001 nohup pnpm --filter web exec next start --port 3000 > "$RUNNER_TEMP/logs/web.log" 2>&1 &
-          NEXT_PUBLIC_API_URL=http://localhost:3009 nohup pnpm --filter web exec next start --port 3002 > "$RUNNER_TEMP/logs/web-dead-api.log" 2>&1 &
+          API_URL=http://localhost:3001 nohup pnpm --filter web exec next start --port 3000 > "$RUNNER_TEMP/logs/web.log" 2>&1 &
+          API_URL=http://localhost:3009 nohup pnpm --filter web exec next start --port 3002 > "$RUNNER_TEMP/logs/web-dead-api.log" 2>&1 &
 
       - name: Wait for servers (max 60 s)
         run: |
@@ -73,8 +90,15 @@ jobs:
           done
 
       # Quoted glob: Node expands it. `node --test holdout/` (a directory) is
-      # not supported by Node 22.
-      - run: node --test 'holdout/*.test.mjs'
+      # not supported by Node 22, and a glob with no match runs 0 tests and
+      # passes, hence the explicit check.
+      - name: Run holdout scenarios
+        run: |
+          if ! compgen -G 'holdout/*.test.mjs' > /dev/null; then
+            echo "::warning::no holdout scenarios on the base commit yet; nothing to run"
+            exit 0
+          fi
+          node --test 'holdout/*.test.mjs'
 
       - name: Server logs
         if: failure()
