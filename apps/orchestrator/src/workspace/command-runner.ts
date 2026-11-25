@@ -24,6 +24,9 @@ export interface CommandRunner {
 export const MAX_OUTPUT = 200_000;
 
 export class SpawnCommandRunner implements CommandRunner {
+  /** `redact` runs on the whole buffered output before it is cut to MAX_OUTPUT. */
+  constructor(private readonly redact: (text: string) => string = (text) => text) {}
+
   run(command: string, args: readonly string[], options: CommandOptions): Promise<CommandResult> {
     return new Promise((resolve, reject) => {
       const child = spawn(command, args, {
@@ -37,14 +40,16 @@ export class SpawnCommandRunner implements CommandRunner {
       let output = "";
       const append = (chunk: Buffer): void => {
         output += chunk.toString("utf8");
-        if (output.length > MAX_OUTPUT * 2) output = output.slice(-MAX_OUTPUT);
+        // Keep twice what is returned: any secret cut by this trim sits at the
+        // start of the buffer, which the final slice below always drops.
+        if (output.length > MAX_OUTPUT * 4) output = output.slice(-MAX_OUTPUT * 2);
       };
       child.stdout.on("data", append);
       child.stderr.on("data", append);
       child.on("error", reject);
       child.on("close", (code, signal) => {
         const suffix = signal ? `\n[killed by ${signal}]` : "";
-        resolve({ code: code ?? 1, output: output.slice(-MAX_OUTPUT) + suffix });
+        resolve({ code: code ?? 1, output: this.redact(output).slice(-MAX_OUTPUT) + suffix });
       });
     });
   }

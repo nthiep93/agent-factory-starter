@@ -85,6 +85,37 @@ describe("RunsController", () => {
     ]);
   });
 
+  it("redacts the whole run record, including blocked paths and verify summary", async () => {
+    queue.snapshots = [
+      {
+        id: "issue-3",
+        state: "completed",
+        data: { ...data(3), title: "leak ghp_test_token" },
+        createdAt: 1,
+        startedAt: 1,
+        finishedAt: 2,
+        record: {
+          issueNumber: 3,
+          branch: "agent/issue-3",
+          outcome: "protected_paths",
+          agent: { ok: true, subtype: "success", costUsd: 0, numTurns: 1 },
+          verify: { passed: false, summary: "ghp_test_token" },
+          commits: 1,
+          headSha: "a".repeat(40),
+          blockedPaths: [".github/ghp_test_token.yml"],
+          pullRequest: null,
+          startedAt: "x",
+          finishedAt: "y",
+        },
+        failedReason: null,
+      },
+    ];
+    const [run] = (await controller.list()).runs;
+    expect(JSON.stringify(run)).not.toContain("ghp_test_token");
+    expect(run?.record?.blockedPaths).toEqual([".github/[REDACTED].yml"]);
+    expect(run?.title).toBe("leak [REDACTED]");
+  });
+
   it("applies the limit and validates it", async () => {
     queue.snapshots = [1, 2, 3].map((n) => ({
       id: `issue-${n}`,

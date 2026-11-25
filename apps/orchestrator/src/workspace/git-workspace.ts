@@ -8,54 +8,79 @@ import type { PreparedWorkspace, VerifyResult, Workspace } from "./workspace.js"
 export interface GitWorkspaceOptions {
   repoDir: string;
   worktreesDir: string;
-  /** Where branches are pushed, e.g. https://github.com/<owner>/<repo>.git. Never a remote name. */
+  /** Where main is fetched from and branches are pushed to: https://github.com/<owner>/<repo>.git. */
   pushUrl: string;
   baseBranch?: string;
   /** Sent as an HTTP header through git's env config for fetch and push, never in argv. */
   pushToken?: string;
   /** Environment to derive child environments from. Defaults to process.env. */
   env?: NodeJS.ProcessEnv;
+  /** Applied to command output before it is truncated into an error or summary. */
+  redact?: (text: string) => string;
   installTimeoutMs?: number;
   verifyTimeoutMs?: number;
 }
 
 const AGENT_BRANCH = /^agent\/issue-[1-9][0-9]*$/;
+const SHA = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 const GIT_TIMEOUT_MS = 5 * 60_000;
 /** Prepended to every git command: no hooks, no fsmonitor daemon, whatever the repo config says. */
 const SAFE_GIT_FLAGS = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor="];
-/** Repo-level settings that would run code or redirect pushes. */
-const RISKY_CONFIG = "^(core\\.hookspath|core\\.fsmonitor|remote\\..*\\.pushurl)$";
+/** Added for commands that talk to the network: TLS on, no proxy, no credential helpers or askpass. */
+const NETWORK_GIT_FLAGS = [
+  "-c",
+  "http.sslVerify=true",
+  "-c",
+  "http.proxy=",
+  "-c",
+  "credential.helper=",
+  "-c",
+  "core.askPass=",
+];
+/** The only repo/worktree config keys git itself writes for this setup. Anything else is refused. */
+const ALLOWED_CONFIG: readonly RegExp[] = [
+  /^core\.(repositoryformatversion|filemode|bare|logallrefupdates|sparsecheckout|sparsecheckoutcone)$/,
+  /^extensions\.worktreeconfig$/,
+  /^remote\.origin\.(url|fetch)$/,
+  /^branch\.[^=]+\.(remote|merge)$/,
+  /^user\.(name|email)$/,
+];
+/** Turbo remote-cache credentials: verify must not read or write a shared cache. */
+const TURBO_REMOTE = ["TURBO_TOKEN", "TURBO_TEAM", "TURBO_API"];
 
 /**
  * Git worktrees under WORKTREES_DIR, created from REPO_DIR. Every command runs
  * through {@link CommandRunner} with an argument array; only the issue number
- * (an integer) and derived names ever reach git. Commands that change REPO_DIR
- * itself (fetch, worktree add/remove/prune, sparse-checkout) run one at a time.
+ * (an integer), derived names and SHAs ever reach git. Commands that change
+ * REPO_DIR itself (fetch, worktree add/remove/prune, sparse-checkout) run one
+ * at a time.
  */
 export class GitWorkspace implements Workspace {
   private readonly baseBranch: string;
   private readonly worktreesDir: string;
   private readonly repoLock = new Mutex();
-  /** For git: no secrets, no system or global git config. */
+  private readonly redact: (text: string) => string;
+  /** For git: no secrets at all, no system or global git config. */
   private readonly gitEnv: Record<string, string>;
-  /** For pnpm, which runs code the agent wrote: no API keys at all. */
+  /** For pnpm, which runs code the agent wrote: no API keys, no remote cache. */
   private readonly pnpmEnv: Record<string, string>;
 
   constructor(
     private readonly options: GitWorkspaceOptions,
-    private readonly runner: CommandRunner = new SpawnCommandRunner(),
+    private readonly runner: CommandRunner = new SpawnCommandRunner(options.redact),
   ) {
     const env = options.env ?? process.env;
     this.baseBranch = options.baseBranch ?? "main";
     this.worktreesDir = resolve(options.worktreesDir);
+    this.redact = options.redact ?? ((text) => text);
     this.gitEnv = {
-      ...withoutSecrets(env),
+      ...withoutSecrets(env, [...ORCHESTRATOR_SECRETS, "ANTHROPIC_API_KEY"]),
       GIT_TERMINAL_PROMPT: "0",
       GIT_CONFIG_NOSYSTEM: "1",
       GIT_CONFIG_GLOBAL: "/dev/null",
     };
     this.pnpmEnv = {
-      ...withoutSecrets(env, [...ORCHESTRATOR_SECRETS, "ANTHROPIC_API_KEY"]),
+      ...withoutSecrets(env, [...ORCHESTRATOR_SECRETS, "ANTHROPIC_API_KEY", ...TURBO_REMOTE]),
       FORCE_COLOR: "0",
       NO_COLOR: "1",
     };
@@ -72,26 +97,43 @@ export class GitWorkspace implements Workspace {
     // A crashed earlier run may have left the worktree behind.
     await this.cleanup(dir);
 
-    await this.repoLock.run(async () => {
+    const { baseSha, remoteBranchSha } = await this.repoLock.run(async () => {
       const repo = this.options.repoDir;
-      await this.assertSafeRepo();
-      await this.git(repo, ["fetch", "--prune", "origin"], this.authEnv());
+      await this.assertSafeRepo([repo]);
+      const trackingRef = `refs/remotes/origin/${this.baseBranch}`;
+      await this.git(
+        repo,
+        [
+          ...NETWORK_GIT_FLAGS,
+          "fetch",
+          "--prune",
+          "--no-tags",
+          this.options.pushUrl,
+          `+refs/heads/${this.baseBranch}:${trackingRef}`,
+        ],
+        this.authEnv(),
+      );
+      // Read once, right after the fetch, and keep it in memory from here on.
+      const base = (
+        await this.git(repo, ["rev-parse", "--verify", `${trackingRef}^{commit}`])
+      ).output.trim();
+      if (!SHA.test(base)) throw new Error(`Unexpected base SHA: ${this.tail(base)}`);
+      const remote = await this.git(
+        repo,
+        [...NETWORK_GIT_FLAGS, "ls-remote", this.options.pushUrl, `refs/heads/${branch}`],
+        this.authEnv(),
+      );
+      const remoteSha = remote.output.trim().split(/\s+/)[0] ?? "";
       // -B resets the branch if an earlier run of the same issue created it.
-      await this.git(repo, ["worktree", "add", "-B", branch, dir, `origin/${this.baseBranch}`]);
+      await this.git(repo, ["worktree", "add", "-B", branch, dir, base]);
       // holdout/ never reaches the agent's disk. Sparse entries are skip-worktree
       // in the index, so commits made here keep the holdout files on the branch.
       await this.git(dir, ["sparse-checkout", "set", "--no-cone", "/*", "!/holdout/"]);
+      return { baseSha: base, remoteBranchSha: SHA.test(remoteSha) ? remoteSha : null };
     });
 
-    const install = await this.runner.run(
-      "pnpm",
-      ["install", "--frozen-lockfile", "--prefer-offline"],
-      { cwd: dir, env: this.pnpmEnv, timeoutMs: this.options.installTimeoutMs ?? 10 * 60_000 },
-    );
-    if (install.code !== 0) {
-      throw new Error(`pnpm install failed (exit ${install.code}): ${tail(install.output)}`);
-    }
-    return { dir, branch };
+    await this.install(dir);
+    return { dir, branch, baseSha, remoteBranchSha };
   }
 
   async isClean(dir: string): Promise<boolean> {
@@ -100,61 +142,88 @@ export class GitWorkspace implements Workspace {
     return result.output.trim() === "";
   }
 
-  async changedFiles(dir: string): Promise<string[]> {
-    this.assertInside(dir);
-    const result = await this.git(dir, [
-      "diff",
-      "--name-only",
+  async headSha(ws: PreparedWorkspace): Promise<string> {
+    this.assertInside(ws.dir);
+    const head = (await this.git(ws.dir, ["rev-parse", "--verify", "HEAD^{commit}"])).output.trim();
+    if (!SHA.test(head)) throw new Error(`Unexpected HEAD: ${this.tail(head)}`);
+    const ancestor = await this.runner.run(
+      "git",
+      [...SAFE_GIT_FLAGS, "merge-base", "--is-ancestor", ws.baseSha, head],
+      { cwd: ws.dir, env: this.gitEnv, timeoutMs: GIT_TIMEOUT_MS },
+    );
+    if (ancestor.code !== 0) {
+      throw new Error(`HEAD ${head} does not descend from the fetched base ${ws.baseSha}`);
+    }
+    return head;
+  }
+
+  async changedFiles(ws: PreparedWorkspace, headSha: string): Promise<string[]> {
+    this.assertInside(ws.dir);
+    assertSha(headSha);
+    // Every commit, merges split per parent: a file added then removed still counts.
+    const result = await this.git(ws.dir, [
+      "log",
       "--no-renames",
-      `origin/${this.baseBranch}...HEAD`,
+      "-m",
+      "--name-only",
+      "--format=",
+      `${ws.baseSha}..${headSha}`,
     ]);
-    return result.output
+    const files = result.output
       .split("\n")
       .map((line) => line.trim())
       .filter(Boolean);
+    return [...new Set(files)];
+  }
+
+  async commitsAhead(ws: PreparedWorkspace, headSha: string): Promise<number> {
+    this.assertInside(ws.dir);
+    assertSha(headSha);
+    const out = await this.git(ws.dir, ["rev-list", "--count", `${ws.baseSha}..${headSha}`]);
+    const count = Number.parseInt(out.output.trim(), 10);
+    if (!Number.isInteger(count))
+      throw new Error(`Unexpected rev-list output: ${this.tail(out.output)}`);
+    return count;
   }
 
   async verify(dir: string): Promise<VerifyResult> {
     this.assertInside(dir);
+    // Nothing the agent's run left behind (node_modules, caches, build output) survives.
+    await this.git(dir, ["clean", "-ffdx"]);
+    const install = await this.runner.run(
+      "pnpm",
+      ["install", "--frozen-lockfile", "--prefer-offline"],
+      { cwd: dir, env: this.pnpmEnv, timeoutMs: this.options.installTimeoutMs ?? 10 * 60_000 },
+    );
+    if (install.code !== 0) {
+      return { passed: false, summary: `pnpm install failed: ${this.summary(install.output)}` };
+    }
     const result = await this.runner.run("pnpm", ["verify"], {
       cwd: dir,
-      env: this.pnpmEnv,
+      env: { ...this.pnpmEnv, TURBO_FORCE: "1" },
       timeoutMs: this.options.verifyTimeoutMs ?? 20 * 60_000,
     });
-    return { passed: result.code === 0, summary: summaryLine(result.output) };
+    return { passed: result.code === 0, summary: this.summary(result.output) };
   }
 
-  async commitsAhead(dir: string): Promise<number> {
-    this.assertInside(dir);
-    const out = await this.git(dir, ["rev-list", "--count", `origin/${this.baseBranch}..HEAD`]);
-    const count = Number.parseInt(out.output.trim(), 10);
-    if (!Number.isInteger(count))
-      throw new Error(`Unexpected rev-list output: ${tail(out.output)}`);
-    return count;
-  }
-
-  async push(dir: string, branch: string): Promise<void> {
-    this.assertInside(dir);
-    if (!AGENT_BRANCH.test(branch)) {
-      throw new Error(`Refusing to push "${branch}": only agent/issue-<n> branches are pushed`);
+  async push(ws: PreparedWorkspace, headSha: string): Promise<void> {
+    this.assertInside(ws.dir);
+    assertSha(headSha);
+    if (!AGENT_BRANCH.test(ws.branch)) {
+      throw new Error(`Refusing to push "${ws.branch}": only agent/issue-<n> branches are pushed`);
     }
-    await this.assertSafeRepo();
-    // Lease on what prepare() fetched: a re-run may replace its own earlier
-    // branch, but never commits someone pushed since. Empty = must not exist.
-    const tracking = await this.runner.run(
-      "git",
-      [...SAFE_GIT_FLAGS, "rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`],
-      { cwd: dir, env: this.gitEnv, timeoutMs: GIT_TIMEOUT_MS },
-    );
-    const expected = tracking.code === 0 ? tracking.output.trim() : "";
+    await this.assertSafeRepo([this.options.repoDir, ws.dir]);
+    // Lease on what prepare() saw on the remote: a re-run may replace its own
+    // earlier branch, never commits someone pushed since. Empty = must not exist.
     await this.git(
-      dir,
+      ws.dir,
       [
+        ...NETWORK_GIT_FLAGS,
         "push",
         "--no-verify",
-        `--force-with-lease=refs/heads/${branch}:${expected}`,
+        `--force-with-lease=refs/heads/${ws.branch}:${ws.remoteBranchSha ?? ""}`,
         this.options.pushUrl,
-        `HEAD:refs/heads/${branch}`,
+        `${headSha}:refs/heads/${ws.branch}`,
       ],
       this.authEnv(),
     );
@@ -179,15 +248,26 @@ export class GitWorkspace implements Workspace {
     });
   }
 
+  private async install(dir: string): Promise<void> {
+    const install = await this.runner.run(
+      "pnpm",
+      ["install", "--frozen-lockfile", "--prefer-offline"],
+      { cwd: dir, env: this.pnpmEnv, timeoutMs: this.options.installTimeoutMs ?? 10 * 60_000 },
+    );
+    if (install.code !== 0) {
+      throw new Error(`pnpm install failed (exit ${install.code}): ${this.tail(install.output)}`);
+    }
+  }
+
   /**
-   * Refuses to work with a REPO_DIR that has executable hooks or config that
-   * runs code or redirects pushes. The -c flags already neutralise most of it;
-   * this makes a tampered clone fail loudly instead.
+   * Refuses executable hooks and any repo or worktree config key outside a
+   * tight allowlist (url.*.insteadOf, http.proxy, credential.helper,
+   * include.path, core.hooksPath, ...). Runs before every fetch and push.
    */
-  private async assertSafeRepo(): Promise<void> {
-    const repo = this.options.repoDir;
+  private async assertSafeRepo(dirs: readonly string[]): Promise<void> {
     const problems: string[] = [];
 
+    const repo = this.options.repoDir;
     const commonDir = (await this.git(repo, ["rev-parse", "--git-common-dir"])).output.trim();
     const hooksDir = resolve(repo, commonDir, "hooks");
     const entries = await readdir(hooksDir).catch(() => [] as string[]);
@@ -197,20 +277,25 @@ export class GitWorkspace implements Workspace {
       if (info?.isFile() && (info.mode & 0o111) !== 0) problems.push(`executable hook ${name}`);
     }
 
-    const config = await this.runner.run(
-      "git",
-      [...SAFE_GIT_FLAGS, "config", "--local", "--get-regexp", RISKY_CONFIG],
-      { cwd: repo, env: this.gitEnv, timeoutMs: GIT_TIMEOUT_MS },
-    );
-    if (config.code === 0) {
-      for (const line of config.output.split("\n").filter(Boolean)) {
-        problems.push(`config ${line.split(" ")[0]}`);
+    for (const dir of dirs) {
+      const list = await this.runner.run(
+        "git",
+        ["config", "--list", "--show-scope", "--includes"],
+        { cwd: dir, env: this.gitEnv, timeoutMs: GIT_TIMEOUT_MS },
+      );
+      if (list.code !== 0) throw new Error(`git config --list failed: ${this.tail(list.output)}`);
+      for (const line of list.output.split("\n").filter(Boolean)) {
+        const [scope = "", entry = ""] = line.split("\t");
+        // "command" is what the orchestrator's own process passes (-c, GIT_CONFIG_*).
+        if (scope === "command") continue;
+        const key = (entry.split("=")[0] ?? "").toLowerCase();
+        if (!ALLOWED_CONFIG.some((re) => re.test(key))) problems.push(`${scope} config ${key}`);
       }
     }
 
     if (problems.length > 0) {
       throw new Error(
-        `Refusing to use REPO_DIR: ${problems.join(", ")}. Remove them from the orchestrator's clone.`,
+        `Refusing to use REPO_DIR: ${[...new Set(problems)].join(", ")}. Remove them from the orchestrator's clone.`,
       );
     }
   }
@@ -226,7 +311,8 @@ export class GitWorkspace implements Workspace {
       timeoutMs: GIT_TIMEOUT_MS,
     });
     if (result.code !== 0) {
-      throw new Error(`git ${args[0]} failed (exit ${result.code}): ${tail(result.output)}`);
+      const verb = args.find((a) => !a.startsWith("-") && !a.includes("=")) ?? "command";
+      throw new Error(`git ${verb} failed (exit ${result.code}): ${this.tail(result.output)}`);
     }
     return result;
   }
@@ -250,6 +336,19 @@ export class GitWorkspace implements Workspace {
       throw new Error(`Refusing to touch ${dir}: outside WORKTREES_DIR`);
     }
   }
+
+  /** Redact first, then cut: a secret straddling the cut cannot leak a prefix. */
+  private tail(output: string, max = 800): string {
+    return this.redact(output).trim().slice(-max);
+  }
+
+  private summary(output: string): string {
+    return summaryLine(this.redact(output));
+  }
+}
+
+function assertSha(sha: string): void {
+  if (!SHA.test(sha)) throw new Error(`Not a commit SHA: ${sha.slice(0, 80)}`);
 }
 
 // eslint-disable-next-line no-control-regex
@@ -264,8 +363,4 @@ export function summaryLine(output: string): string {
     .filter(Boolean);
   const last = (re: RegExp): string | undefined => lines.filter((l) => re.test(l)).at(-1);
   return last(/^Tasks:/) ?? last(/^Tests\s+\d/) ?? lines.at(-1) ?? "(no output)";
-}
-
-function tail(output: string, max = 800): string {
-  return output.trim().slice(-max);
 }

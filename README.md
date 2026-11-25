@@ -123,7 +123,7 @@ Auto-merge cho PR `risk:low` từ nhánh `claude/*` **mặc định tắt**. Cá
 
 ### Orchestrator
 
-`apps/orchestrator` nhận webhook GitHub (có kiểm chữ ký HMAC), xếp việc vào BullMQ và chạy Claude Agent SDK trong worktree riêng có giới hạn turn và ngân sách. Sau đó orchestrator **tự chạy `pnpm verify`**, từ chối các nhánh đụng vào `.github/`, `.claude/`, `holdout/` hoặc cấu hình verify, rồi mới push và mở PR. Service này chạy dài hạn, cần Redis và git, nên phải chạy trên VM, Render hoặc Fly, trong container có user riêng, không đặt trên Vercel. Chi tiết: [`docs/orchestrator.md`](docs/orchestrator.md).
+`apps/orchestrator` nhận webhook GitHub (có kiểm chữ ký HMAC), xếp việc vào BullMQ và chạy Claude Agent SDK trong worktree riêng có giới hạn turn và ngân sách. Sau đó orchestrator **tự chạy `pnpm verify`**, từ chối các nhánh đụng vào `.github/`, `.claude/`, `holdout/` hoặc cấu hình verify, rồi mới push và mở PR. Service này chạy dài hạn, cần Redis và git, nên phải chạy trên VM, Render hoặc Fly, trong container có user riêng, không đặt trên Vercel. Orchestrator còn ở mức **thử nghiệm**: code mà agent viết vẫn chạy cùng user OS trong lúc verify, nên agent và verify phải chạy trong container dùng một lần cho mỗi run trước khi dùng thật (xem mục "Trust boundary"). Chi tiết: [`docs/orchestrator.md`](docs/orchestrator.md).
 
 ## Cấu hình GitHub
 

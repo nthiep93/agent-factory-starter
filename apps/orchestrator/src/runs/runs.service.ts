@@ -1,5 +1,5 @@
 import { BadRequestException, Inject, Injectable } from "@nestjs/common";
-import { makeRedactor, type Redact } from "../common/redact.js";
+import { makeRedactor, redactDeep, type Redact } from "../common/redact.js";
 import { APP_CONFIG, secretValues, type OrchestratorConfig } from "../config/config.js";
 import { TASK_QUEUE, type ListedState, type TaskQueue } from "../tasks/task-queue.js";
 import type { RunRecord } from "../tasks/task.types.js";
@@ -37,17 +37,23 @@ export class RunsService {
   async recent(limitParam?: string): Promise<RunView[]> {
     const limit = parseLimit(limitParam);
     const snapshots = await this.queue.list(STATES, limit);
-    return snapshots.map((s) => ({
-      id: s.id,
-      issueNumber: s.data.issueNumber,
-      title: s.data.title,
-      state: s.state,
-      createdAt: iso(s.createdAt) ?? "",
-      startedAt: iso(s.startedAt),
-      finishedAt: iso(s.finishedAt),
-      record: s.record,
-      failedReason: s.failedReason === null ? null : this.redact(s.failedReason),
-    }));
+    // The whole view is redacted: title, record (summaries, blocked paths) and failure reason.
+    return snapshots.map((s) =>
+      redactDeep<RunView>(
+        {
+          id: s.id,
+          issueNumber: s.data.issueNumber,
+          title: s.data.title,
+          state: s.state,
+          createdAt: iso(s.createdAt) ?? "",
+          startedAt: iso(s.startedAt),
+          finishedAt: iso(s.finishedAt),
+          record: s.record,
+          failedReason: s.failedReason,
+        },
+        this.redact,
+      ),
+    );
   }
 }
 

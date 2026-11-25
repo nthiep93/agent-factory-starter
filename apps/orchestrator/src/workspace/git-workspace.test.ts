@@ -40,11 +40,13 @@ interface RecordedCall {
 class StubPnpmRunner implements CommandRunner {
   readonly calls: RecordedCall[] = [];
   pnpmResult: CommandResult = { code: 0, output: "" };
+  /** When set, decides each pnpm result (e.g. install ok, verify failing). */
+  pnpmFor: ((args: readonly string[]) => CommandResult) | null = null;
   private readonly real = new SpawnCommandRunner();
 
   run(command: string, args: readonly string[], options: CommandOptions): Promise<CommandResult> {
     this.calls.push({ command, args, options });
-    if (command === "pnpm") return Promise.resolve(this.pnpmResult);
+    if (command === "pnpm") return Promise.resolve(this.pnpmFor?.(args) ?? this.pnpmResult);
     return this.real.run(command, args, { ...options, env: { ...options.env, ...gitEnv } });
   }
 }
@@ -77,7 +79,12 @@ describe("GitWorkspace against a real git origin and clone", () => {
         repoDir,
         worktreesDir,
         pushUrl: origin,
-        env: { PATH: process.env.PATH ?? "", GITHUB_TOKEN: "ghp_x" },
+        env: {
+          PATH: process.env.PATH ?? "",
+          GITHUB_TOKEN: "ghp_x",
+          ANTHROPIC_API_KEY: "sk-ant-test",
+          TURBO_TOKEN: "turbo-remote",
+        },
       },
       runner,
     );
@@ -98,10 +105,33 @@ describe("GitWorkspace against a real git origin and clone", () => {
 
     const ws = await workspace.prepare(42);
 
-    expect(ws).toEqual({ dir: join(worktreesDir, "issue-42"), branch: "agent/issue-42" });
+    expect(ws).toEqual({
+      dir: join(worktreesDir, "issue-42"),
+      branch: "agent/issue-42",
+      baseSha: git(origin, "rev-parse", "refs/heads/main"),
+      remoteBranchSha: null,
+    });
     expect(git(ws.dir, "branch", "--show-current")).toBe("agent/issue-42");
     expect(existsSync(join(ws.dir, "later.txt"))).toBe(true);
-    expect(await workspace.commitsAhead(ws.dir)).toBe(0);
+    expect(await workspace.commitsAhead(ws, await workspace.headSha(ws))).toBe(0);
+
+    const fetch = runner.calls.find((c) => c.args.includes("fetch"));
+    expect(fetch?.args).toEqual(
+      expect.arrayContaining([
+        "core.hooksPath=/dev/null",
+        "http.sslVerify=true",
+        "http.proxy=",
+        "credential.helper=",
+        "core.askPass=",
+        origin,
+        "+refs/heads/main:refs/remotes/origin/main",
+      ]),
+    );
+    for (const call of runner.calls.filter((c) => c.command === "git")) {
+      expect(call.options.env.ANTHROPIC_API_KEY).toBeUndefined();
+      expect(call.options.env.GITHUB_TOKEN).toBeUndefined();
+      expect(call.options.env.GIT_CONFIG_GLOBAL).toBe("/dev/null");
+    }
 
     const install = runner.calls.find((c) => c.command === "pnpm");
     expect(install?.args).toEqual(["install", "--frozen-lockfile", "--prefer-offline"]);
@@ -116,8 +146,18 @@ describe("GitWorkspace against a real git origin and clone", () => {
     git(ws.dir, "add", "feature.ts");
     git(ws.dir, "commit", "-q", "-m", "feat: x");
 
-    expect(await workspace.commitsAhead(ws.dir)).toBe(1);
-    await workspace.push(ws.dir, ws.branch);
+    const head = await workspace.headSha(ws);
+    expect(await workspace.commitsAhead(ws, head)).toBe(1);
+    await workspace.push(ws, head);
+    const push = runner.calls.find((c) => c.args.includes("push"));
+    expect(push?.args).toEqual(
+      expect.arrayContaining([
+        "--no-verify",
+        "credential.helper=",
+        origin,
+        `${head}:refs/heads/agent/issue-7`,
+      ]),
+    );
 
     const remoteSha = git(origin, "rev-parse", "refs/heads/agent/issue-7");
     expect(remoteSha).toBe(git(ws.dir, "rev-parse", "HEAD"));
@@ -133,16 +173,18 @@ describe("GitWorkspace against a real git origin and clone", () => {
     await writeFile(join(first.dir, "a.txt"), "a\n");
     git(first.dir, "add", "a.txt");
     git(first.dir, "commit", "-q", "-m", "first try");
-    await workspace.push(first.dir, first.branch);
+    await workspace.push(first, await workspace.headSha(first));
+    const firstSha = git(origin, "rev-parse", "refs/heads/agent/issue-9");
     // Simulate a crash: the worktree directory is left behind.
 
     const second = await workspace.prepare(9);
     expect(second.dir).toBe(first.dir);
+    expect(second.remoteBranchSha).toBe(firstSha);
     expect(existsSync(join(second.dir, "a.txt"))).toBe(false);
     await writeFile(join(second.dir, "b.txt"), "b\n");
     git(second.dir, "add", "b.txt");
     git(second.dir, "commit", "-q", "-m", "second try");
-    await workspace.push(second.dir, second.branch);
+    await workspace.push(second, await workspace.headSha(second));
 
     expect(git(origin, "log", "--format=%s", "-1", "refs/heads/agent/issue-9")).toBe("second try");
     await workspace.cleanup(second.dir);
@@ -150,7 +192,9 @@ describe("GitWorkspace against a real git origin and clone", () => {
 
   it("refuses to push anything but an agent/issue-<n> branch", async () => {
     const ws = await workspace.prepare(3);
-    await expect(workspace.push(ws.dir, "main")).rejects.toThrow(/agent\/issue-/);
+    const head = await workspace.headSha(ws);
+    await expect(workspace.push({ ...ws, branch: "main" }, head)).rejects.toThrow(/agent\/issue-/);
+    await expect(workspace.push(ws, "HEAD")).rejects.toThrow(/SHA/);
     await workspace.cleanup(ws.dir);
   });
 
@@ -162,6 +206,51 @@ describe("GitWorkspace against a real git origin and clone", () => {
   it("throws with the tail of the output when pnpm install fails", async () => {
     runner.pnpmResult = { code: 1, output: "lots\nof\nERR_PNPM_OUTDATED_LOCKFILE boom" };
     await expect(workspace.prepare(5)).rejects.toThrow(/pnpm install failed.*OUTDATED_LOCKFILE/s);
+  });
+
+  it("redacts command output before cutting it into an error message", async () => {
+    const secret = "install-output-secret";
+    const redacting = new GitWorkspace(
+      { repoDir, worktreesDir, pushUrl: origin, redact: (t) => t.split(secret).join("[REDACTED]") },
+      runner,
+    );
+    // tail() keeps the last 800 characters: the secret straddles that cut.
+    runner.pnpmResult = { code: 1, output: `${secret}${"x".repeat(790)}` };
+    const error = await redacting.prepare(30).then(
+      () => new Error("expected prepare to fail"),
+      (e: unknown) => e as Error,
+    );
+    expect(error.message).toMatch(/pnpm install failed/);
+    expect(error.message).not.toContain("secret");
+  });
+
+  it("verifies on a clean tree: git clean -ffdx, fresh install, turbo cache bypassed", async () => {
+    const ws = await workspace.prepare(12);
+    await writeFile(join(ws.dir, "leftover.js"), "planted by the agent\n");
+    runner.calls.length = 0;
+
+    await workspace.verify(ws.dir);
+
+    expect(existsSync(join(ws.dir, "leftover.js"))).toBe(false);
+    const steps = runner.calls.map(
+      (c) => `${c.command} ${c.args.filter((a) => !a.includes("=") && a !== "-c").join(" ")}`,
+    );
+    expect(steps).toEqual([
+      "git clean -ffdx",
+      "pnpm install --frozen-lockfile --prefer-offline",
+      "pnpm verify",
+    ]);
+    const verifyEnv = runner.calls.at(-1)?.options.env ?? {};
+    expect(verifyEnv.TURBO_FORCE).toBe("1");
+    expect(verifyEnv.TURBO_TOKEN).toBeUndefined();
+    expect(verifyEnv.ANTHROPIC_API_KEY).toBeUndefined();
+
+    runner.pnpmResult = { code: 1, output: "ERR_PNPM_OUTDATED_LOCKFILE" };
+    expect(await workspace.verify(ws.dir)).toEqual({
+      passed: false,
+      summary: "pnpm install failed: ERR_PNPM_OUTDATED_LOCKFILE",
+    });
+    await workspace.cleanup(ws.dir);
   });
 
   it("reports verify pass and failure with a summary line", async () => {
@@ -179,7 +268,11 @@ describe("GitWorkspace against a real git origin and clone", () => {
     expect(verifyCall?.args).toEqual(["verify"]);
     expect(verifyCall?.options.env.GITHUB_TOKEN).toBeUndefined();
 
-    runner.pnpmResult = { code: 1, output: "src/a.ts(1,1): error TS2322: nope\nELIFECYCLE failed" };
+    let call = 0;
+    runner.pnpmFor = () =>
+      ++call % 2 === 1
+        ? { code: 0, output: "installed" }
+        : { code: 1, output: "src/a.ts(1,1): error TS2322: nope\nELIFECYCLE failed" };
     expect(await workspace.verify(ws.dir)).toEqual({
       passed: false,
       summary: "ELIFECYCLE failed",
@@ -225,12 +318,12 @@ describe("GitWorkspace safety checks against a real git setup", () => {
     await writeFile(join(ws.dir, "README.md"), "changed\n");
     git(ws.dir, "add", "-A");
     git(ws.dir, "commit", "-q", "-m", "change everything");
-    await workspace.push(ws.dir, ws.branch);
+    await workspace.push(ws, await workspace.headSha(ws));
 
     expect(git(origin, "ls-tree", "-r", "--name-only", "refs/heads/agent/issue-4")).toContain(
       "holdout/scenario.md",
     );
-    expect(await workspace.changedFiles(ws.dir)).toEqual(["README.md"]);
+    expect(await workspace.changedFiles(ws, await workspace.headSha(ws))).toEqual(["README.md"]);
     await workspace.cleanup(ws.dir);
   });
 
@@ -242,7 +335,99 @@ describe("GitWorkspace safety checks against a real git setup", () => {
     git(ws.dir, "add", ".github/ci.yml");
     git(ws.dir, "commit", "-q", "-m", "ci");
     expect(await workspace.isClean(ws.dir)).toBe(true);
-    expect(await workspace.changedFiles(ws.dir)).toEqual([".github/ci.yml"]);
+    expect(await workspace.changedFiles(ws, await workspace.headSha(ws))).toEqual([
+      ".github/ci.yml",
+    ]);
+    await workspace.cleanup(ws.dir);
+  });
+
+  it("checks the fetched base SHA, not refs: moving origin/main does not hide a commit", async () => {
+    const ws = await workspace.prepare(20);
+    await mkdir(join(ws.dir, ".github"));
+    await writeFile(join(ws.dir, ".github", "ci.yml"), "x\n");
+    git(ws.dir, "add", ".github/ci.yml");
+    git(ws.dir, "commit", "-q", "-m", "ci");
+    // Agent-written code moves the tracking ref to HEAD to make the branch look empty.
+    git(repoDir, "update-ref", "refs/remotes/origin/main", git(ws.dir, "rev-parse", "HEAD"));
+
+    const head = await workspace.headSha(ws);
+    expect(await workspace.changedFiles(ws, head)).toEqual([".github/ci.yml"]);
+    expect(await workspace.commitsAhead(ws, head)).toBe(1);
+    await workspace.cleanup(ws.dir);
+  });
+
+  it("lists paths of every commit, even when a later commit undoes them", async () => {
+    const ws = await workspace.prepare(21);
+    await mkdir(join(ws.dir, ".github"));
+    await writeFile(join(ws.dir, ".github", "ci.yml"), "x\n");
+    git(ws.dir, "add", "-A");
+    git(ws.dir, "commit", "-q", "-m", "add ci");
+    git(ws.dir, "rm", "-q", ".github/ci.yml");
+    git(ws.dir, "commit", "-q", "-m", "remove ci");
+    await writeFile(join(ws.dir, "src.ts"), "x\n");
+    git(ws.dir, "add", "src.ts");
+    git(ws.dir, "commit", "-q", "-m", "src");
+
+    const head = await workspace.headSha(ws);
+    expect(git(ws.dir, "diff", "--name-only", `${ws.baseSha}...${head}`)).toBe("src.ts");
+    expect(await workspace.changedFiles(ws, head)).toEqual(["src.ts", ".github/ci.yml"]);
+    await workspace.cleanup(ws.dir);
+  });
+
+  it("refuses a HEAD that does not descend from the fetched base", async () => {
+    const ws = await workspace.prepare(22);
+    git(ws.dir, "checkout", "-q", "--orphan", "rewritten");
+    git(ws.dir, "commit", "-q", "-m", "unrelated history");
+    await expect(workspace.headSha(ws)).rejects.toThrow(/does not descend/);
+    await workspace.cleanup(ws.dir);
+  });
+
+  it("pushes exactly the verified SHA even if HEAD moves afterwards", async () => {
+    const ws = await workspace.prepare(23);
+    await writeFile(join(ws.dir, "a.ts"), "a\n");
+    git(ws.dir, "add", "a.ts");
+    git(ws.dir, "commit", "-q", "-m", "verified");
+    const verified = await workspace.headSha(ws);
+    await writeFile(join(ws.dir, "b.ts"), "b\n");
+    git(ws.dir, "add", "b.ts");
+    git(ws.dir, "commit", "-q", "-m", "sneaked in after verify");
+
+    await workspace.push(ws, verified);
+
+    expect(git(origin, "rev-parse", "refs/heads/agent/issue-23")).toBe(verified);
+    await workspace.cleanup(ws.dir);
+  });
+
+  it("refuses planted git config: insteadOf, proxy, credential helper, include", async () => {
+    const included = join(root, "included.gitconfig");
+    await writeFile(included, "[user]\n  name = x\n");
+    for (const [key, value] of [
+      ["url.https://evil.example/.insteadOf", origin],
+      ["http.proxy", "http://127.0.0.1:9"],
+      ["credential.helper", "!sh -c 'cat >/tmp/stolen'"],
+      ["include.path", included],
+    ] as const) {
+      git(repoDir, "config", key, value);
+      await expect(workspace.prepare(24)).rejects.toThrow(
+        new RegExp(`local config ${key.replace(/[.]/g, "\\.")}`, "i"),
+      );
+      git(repoDir, "config", "--unset", key);
+    }
+    const ws = await workspace.prepare(24);
+    await workspace.cleanup(ws.dir);
+  });
+
+  it("refuses to push when the worktree's config.worktree gains a key", async () => {
+    const ws = await workspace.prepare(25);
+    await writeFile(join(ws.dir, "a.ts"), "a\n");
+    git(ws.dir, "add", "a.ts");
+    git(ws.dir, "commit", "-q", "-m", "a");
+    git(ws.dir, "config", "--worktree", "http.proxy", "http://127.0.0.1:9");
+
+    await expect(workspace.push(ws, await workspace.headSha(ws))).rejects.toThrow(
+      /worktree config http\.proxy/,
+    );
+    expect(git(origin, "branch", "--list", "agent/issue-25")).toBe("");
     await workspace.cleanup(ws.dir);
   });
 

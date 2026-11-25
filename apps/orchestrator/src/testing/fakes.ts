@@ -75,6 +75,9 @@ export class FakeAgentRunner implements AgentRunner {
   }
 }
 
+export const FAKE_BASE_SHA = "b".repeat(40);
+export const FAKE_HEAD_SHA = "a".repeat(40);
+
 export class FakeWorkspace implements Workspace {
   readonly events: string[] = [];
   verifyResult: VerifyResult = { passed: true, summary: "Tasks:    6 successful, 6 total" };
@@ -83,11 +86,18 @@ export class FakeWorkspace implements Workspace {
   changed: string[] = ["apps/api/src/ping/ping.controller.ts"];
   prepareError: Error | null = null;
   pushError: Error | null = null;
+  headError: Error | null = null;
+  head = FAKE_HEAD_SHA;
 
   async prepare(issueNumber: number): Promise<PreparedWorkspace> {
     this.events.push(`prepare:${issueNumber}`);
     if (this.prepareError) throw this.prepareError;
-    return { dir: `/srv/worktrees/issue-${issueNumber}`, branch: `agent/issue-${issueNumber}` };
+    return {
+      dir: `/srv/worktrees/issue-${issueNumber}`,
+      branch: `agent/issue-${issueNumber}`,
+      baseSha: FAKE_BASE_SHA,
+      remoteBranchSha: null,
+    };
   }
 
   async isClean(dir: string): Promise<boolean> {
@@ -95,8 +105,14 @@ export class FakeWorkspace implements Workspace {
     return this.clean;
   }
 
-  async changedFiles(dir: string): Promise<string[]> {
-    this.events.push(`changedFiles:${dir}`);
+  async headSha(ws: PreparedWorkspace): Promise<string> {
+    this.events.push(`headSha:${ws.dir}`);
+    if (this.headError) throw this.headError;
+    return this.head;
+  }
+
+  async changedFiles(ws: PreparedWorkspace, headSha: string): Promise<string[]> {
+    this.events.push(`changedFiles:${ws.dir}@${headSha}`);
     return this.changed;
   }
 
@@ -105,13 +121,13 @@ export class FakeWorkspace implements Workspace {
     return this.verifyResult;
   }
 
-  async commitsAhead(dir: string): Promise<number> {
-    this.events.push(`commitsAhead:${dir}`);
+  async commitsAhead(ws: PreparedWorkspace, headSha: string): Promise<number> {
+    this.events.push(`commitsAhead:${ws.dir}@${headSha}`);
     return this.commits;
   }
 
-  async push(dir: string, branch: string): Promise<void> {
-    this.events.push(`push:${dir}:${branch}`);
+  async push(ws: PreparedWorkspace, headSha: string): Promise<void> {
+    this.events.push(`push:${ws.dir}:${ws.branch}@${headSha}`);
     if (this.pushError) throw this.pushError;
   }
 

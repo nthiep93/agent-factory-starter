@@ -3,7 +3,8 @@ import { Module, type DynamicModule } from "@nestjs/common";
 import { AGENT_RUNNER } from "./agent/agent-runner.js";
 import { ClaudeAgentRunner } from "./agent/claude-agent-runner.js";
 import { resolveEnvScrub } from "./agent/env-scrub.js";
-import { APP_CONFIG, type OrchestratorConfig } from "./config/config.js";
+import { makeRedactor } from "./common/redact.js";
+import { APP_CONFIG, secretValues, type OrchestratorConfig } from "./config/config.js";
 import { GITHUB_CLIENT } from "./github/github-client.js";
 import { RestGitHubClient } from "./github/rest-github-client.js";
 import { HealthController } from "./health/health.controller.js";
@@ -58,6 +59,8 @@ export class AppModule {
               // Built from the validated owner/repo; never the clone's remote config.
               pushUrl: `https://github.com/${c.repository.owner}/${c.repository.repo}.git`,
               pushToken: c.githubToken,
+              // Command output is redacted before it is cut into errors and summaries.
+              redact: makeRedactor(secretValues(c)),
             }),
           inject: [APP_CONFIG],
         },

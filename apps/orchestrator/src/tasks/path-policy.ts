@@ -15,25 +15,44 @@ export function protectedPaths(files: readonly string[]): string[] {
   );
 }
 
-const ROOT_VERIFY_FILES = new Set(["turbo.json", "pnpm-workspace.yaml", ".npmrc"]);
+/** Files, at any depth, that change how dependencies install or how checks run. */
+const VERIFY_FILES = new Set([
+  "package.json",
+  "pnpm-lock.yaml",
+  "pnpm-workspace.yaml",
+  ".pnpmfile.cjs",
+  "pnpmfile.cjs",
+  "turbo.json",
+  ".npmrc",
+  ".swcrc",
+  ".prettierignore",
+  ".gitattributes",
+]);
+const VERIFY_PREFIXES = [
+  "eslint.config.",
+  "vitest.config.",
+  "vitest.workspace.",
+  "next.config.",
+  ".prettierrc",
+];
 
 /**
- * Changed paths that define what `pnpm verify` checks. A branch that touches
- * them could make the orchestrator's independent verify pass trivially, so it
- * is not pushed automatically.
+ * Changed paths that define what `pnpm verify` installs and checks. A branch
+ * that touches them could make the orchestrator's independent verify pass
+ * trivially (or run code at install time), so it is never pushed
+ * automatically. This includes lockfile-only changes: --frozen-lockfile does
+ * not validate integrity hashes or tarball URLs against package.json.
+ * Tasks that need dependency changes go to a human.
  */
 export function verifyConfigPaths(files: readonly string[]): string[] {
   return files.filter((file) => {
-    const base = posix.basename(file);
+    const parts = file.split("/");
+    const base = parts.at(-1) ?? "";
     return (
-      ROOT_VERIFY_FILES.has(file) ||
-      file.startsWith("scripts/") ||
-      base === "package.json" ||
-      base.startsWith("eslint.config.") ||
-      base.startsWith("vitest.config.") ||
+      VERIFY_FILES.has(base) ||
+      VERIFY_PREFIXES.some((prefix) => base.startsWith(prefix)) ||
       /^tsconfig.*\.json$/.test(base) ||
-      base.startsWith(".prettierrc") ||
-      base === ".prettierignore"
+      parts.slice(0, -1).includes("scripts")
     );
   });
 }

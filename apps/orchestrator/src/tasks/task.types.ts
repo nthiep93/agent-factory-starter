@@ -34,6 +34,8 @@ export interface RunRecord {
   } | null;
   verify: { passed: boolean; summary: string } | null;
   commits: number;
+  /** The commit that was checked, verified and pushed. */
+  headSha: string | null;
   /** Changed paths that stopped the run (protected_paths, verify_config_changed). */
   blockedPaths: string[];
   pullRequest: { number: number; url: string } | null;

@@ -24,15 +24,16 @@ GitHub (issue được gắn label "agent")
 |                         v                                                             |
 |  TaskProcessor (WorkerHost, concurrency = AGENT_CONCURRENCY) -> TaskPipeline          |
 |     1. GitHubClient.commentOnIssue("picked up")                                       |
-|     2. Workspace.prepare(n): kiểm tra hooks/config của REPO_DIR, git fetch,           |
-|        git worktree add -B agent/issue-<n> ... origin/main, sparse-checkout bỏ        |
-|        holdout/, pnpm install --frozen-lockfile                                       |
+|     2. Workspace.prepare(n): kiểm tra hooks + allowlist git config, fetch main từ    |
+|        URL tường minh, ghi nhớ baseSha, git worktree add -B agent/issue-<n> ...       |
+|        <baseSha>, sparse-checkout bỏ holdout/, pnpm install --frozen-lockfile         |
 |     3. AgentRunner.run(): Claude Agent SDK query() trong worktree                     |
-|     4. Kiểm tra: tree sạch (dirty_tree), không đụng path protected                    |
-|        (protected_paths), không đổi config của verify (verify_config_changed),       |
-|        có commit (no_commits)                                                         |
-|     5. Workspace.verify(): orchestrator tự chạy pnpm verify (verify_failed)           |
-|     6. push -> createPullRequest ("Closes #n") -> comment link (pr_opened);           |
+|     4. Kiểm tra trên đúng SHA của HEAD (con cháu của baseSha): tree sạch            |
+|        (dirty_tree), path của MỌI commit không protected (protected_paths), không    |
+|        đổi config của verify (verify_config_changed), có commit (no_commits)          |
+|     5. Workspace.verify(): git clean -ffdx, cài lại, pnpm verify với TURBO_FORCE=1    |
+|        (verify_failed)                                                                |
+|     6. push đúng <headSha> -> createPullRequest -> comment link (pr_opened);          |
 |        422 "already exists" -> link PR đang mở (pr_updated)                           |
 |        bị chặn ở bước 4/5: comment lý do, không push, giữ branch local               |
 |     7. finally: Workspace.cleanup() xoá thư mục worktree                              |
@@ -177,14 +178,35 @@ Nên chạy trên VM (systemd), Render "Background Worker"/"Web Service" có per
 - **Webhook được xác thực**: HMAC-SHA256 trên raw body, so sánh bằng `crypto.timingSafeEqual`; thiếu hoặc sai signature -> 401 (kể cả `ping`). Payload không có `repository.full_name` khớp (không phân biệt hoa thường) với `GITHUB_REPOSITORY` bị bỏ qua.
 - **Agent không push và không sửa CI.** `ClaudeAgentRunner` dùng `permissionMode: "acceptEdits"`, `settingSources: ["project"]` (nên `CLAUDE.md`, hooks `protect-files.sh` và deny rules trong `.claude/settings.json` vẫn áp dụng), `allowedTools` chỉ gồm `pnpm install --frozen-lockfile`, `pnpm verify|lint|typecheck|test|format`, `git add`, `git commit`; `disallowedTools` chặn `Edit/Write(.github/**)`, `Edit/Write(.claude/**)`, `Read/Edit/Write(holdout/**)`, `Bash(git push *)`, `Bash(gh *)`.
 - **Orchestrator giữ GitHub token.** Agent process nhận env đã loại `GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_WEBHOOK_SECRET`, `REDIS_URL`, `RUNS_API_TOKEN`. `pnpm install`/`pnpm verify` (chạy code agent vừa viết) còn bị loại thêm `ANTHROPIC_API_KEY`. Token dùng cho `git push` được truyền qua `GIT_CONFIG_*` env (HTTP header), không nằm trong argv hay remote URL. Mọi lệnh chạy bằng `spawn` với mảng argument, không qua shell.
-- **Không tin agent**: trước khi push, orchestrator yêu cầu tree sạch (`git status --porcelain` rỗng), liệt kê file thay đổi bằng `git diff --name-only origin/main...HEAD` và từ chối nếu có path dưới `.github/`, `.claude/`, `holdout/` hoặc `AGENTS.md`/`CLAUDE.md` ở bất kỳ cấp nào (`protected_paths`), hoặc file định nghĩa verify: mọi `package.json`, `turbo.json`, `pnpm-workspace.yaml`, `.npmrc`, `eslint.config.*`, `vitest.config.*`, `tsconfig*.json`, `.prettierrc*`, `.prettierignore`, `scripts/` (`verify_config_changed`; task cần thêm dependency vì vậy phải do người làm). Sau đó mới tự chạy `pnpm verify`. PR vẫn cần người review và CI `verify` job trước khi merge.
+- **Không tin agent**: `prepare()` fetch `main` từ URL tường minh (`+refs/heads/main:refs/remotes/origin/main`) và giữ `baseSha` trong bộ nhớ; mọi kiểm tra sau đó dùng SHA này, không bao giờ đọc lại `refs/remotes/*` (code của agent có thể sửa ref). Trước khi push: tree phải sạch; HEAD phải là con cháu của `baseSha` (`git merge-base --is-ancestor`); path của **từng commit** (`git log --no-renames -m --name-only <baseSha>..<head>`, không chỉ diff tổng) không được nằm dưới `.github/`, `.claude/`, `holdout/` hay là `AGENTS.md`/`CLAUDE.md` ở bất kỳ cấp nào (`protected_paths`), và không được là file định nghĩa install/verify ở bất kỳ cấp nào: `package.json`, `pnpm-lock.yaml` (kể cả thay đổi chỉ trong lockfile: `--frozen-lockfile` không đối chiếu integrity hash hay tarball URL), `pnpm-workspace.yaml`, `.pnpmfile.cjs`/`pnpmfile.cjs`, `turbo.json`, `.npmrc`, `.swcrc`, `.gitattributes`, `eslint.config.*`, `vitest.config.*`, `vitest.workspace.*`, `next.config.*`, `tsconfig*.json`, `.prettierrc*`, `.prettierignore`, mọi thư mục `scripts/` (`verify_config_changed`; task cần đổi dependency phải do người làm). Verify chạy sau `git clean -ffdx` và `pnpm install --frozen-lockfile` mới, với `TURBO_FORCE=1` và không có `TURBO_TOKEN`/`TURBO_TEAM`/`TURBO_API`. Push đẩy đúng SHA đã kiểm tra (`<headSha>:refs/heads/<branch>`), không phải HEAD lúc push. PR vẫn cần người review và CI `verify` job trước khi merge.
 - **holdout/ không có trên đĩa của agent**: worktree dùng `git sparse-checkout set --no-cone '/*' '!/holdout/'`; file holdout là skip-worktree trong index nên commit của agent (kể cả `git add -A`) không xoá chúng khỏi branch.
-- **Git được làm cứng**: mọi lệnh git chạy với `-c core.hooksPath=/dev/null -c core.fsmonitor=`, `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`; push dùng `--no-verify` tới URL tường minh. `prepare()` và `push()` từ chối chạy nếu `REPO_DIR` có hook thực thi được (không phải `*.sample`) hoặc config `core.hooksPath`, `core.fsmonitor`, `remote.*.pushurl`. Các lệnh thay đổi `REPO_DIR` (fetch, worktree add/remove/prune, sparse-checkout) chạy tuần tự qua một mutex trong process.
-- **Redact ở mọi biên**: comment, PR body, giá trị trả về của job, `failedReason`, log và `GET /runs` đều đi qua `redactSecrets`: thay giá trị của `GITHUB_TOKEN`, `GITHUB_WEBHOOK_SECRET`, `RUNS_API_TOKEN`, `ANTHROPIC_API_KEY` và mọi chuỗi dạng `ghp_`, `gho_`, `ghs_`, `ghu_`, `ghr_`, `github_pat_`, `sk-ant-` bằng `[REDACTED]`.
+- **Git được làm cứng**: mọi lệnh git chạy với `-c core.hooksPath=/dev/null -c core.fsmonitor=`, `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null` và env không có token hay `ANTHROPIC_API_KEY`; fetch, `ls-remote` và push thêm `-c http.sslVerify=true -c http.proxy= -c credential.helper= -c core.askPass=`, push dùng `--no-verify` tới URL tường minh. Trước mỗi fetch và push, orchestrator đọc `git config --list --show-scope --includes` của `REPO_DIR` và của worktree, và từ chối mọi key ngoài allowlist (`core.repositoryformatversion|filemode|bare|logallrefupdates|sparsecheckout|sparsecheckoutcone`, `extensions.worktreeconfig`, `remote.origin.url|fetch`, `branch.*.remote|merge`, `user.name|email`); vì vậy `url.*.insteadOf`, `http.proxy`, `credential.helper`, `include.path`, `core.hooksPath`, `remote.*.pushurl` hay một key trong `config.worktree` đều làm run dừng. Hook thực thi được (không phải `*.sample`) cũng bị từ chối. Các lệnh thay đổi `REPO_DIR` (fetch, worktree add/remove/prune, sparse-checkout) chạy tuần tự qua một mutex trong process.
+- **Redact ở mọi biên, trước khi cắt chuỗi**: comment, PR title/body, toàn bộ run record (kể cả `blockedPaths`), `failedReason`, log, output của git/pnpm và `GET /runs` đều đi qua redactor: thay `GITHUB_TOKEN`, `GITHUB_WEBHOOK_SECRET`, `RUNS_API_TOKEN`, `ANTHROPIC_API_KEY` ở dạng gốc, base64/base64url (ở cả 3 offset byte), URL-encoded, hex, giá trị header basic-auth, kể cả khi bị chèn khoảng trắng/xuống dòng, và mọi chuỗi dạng `ghp_`, `gho_`, `ghs_`, `ghu_`, `ghr_`, `github_pat_`, `sk-ant-`, bằng `[REDACTED]`. Redact luôn chạy trước khi cắt (summary, title, quote, tail của output), nên một secret nằm vắt qua chỗ cắt không lộ phần đầu.
 - **`GET /runs`**: đặt `RUNS_API_TOKEN` trên production. Khi không có token, endpoint chỉ trả lời địa chỉ socket loopback; sau reverse proxy mọi request đều trông như loopback, nên khi đó bắt buộc phải có token.
 - **`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`**: Claude Code CLI đi kèm SDK 0.3.332 có biến này; khi bật, subprocess của Bash tool chạy trong sandbox bubblewrap với env đã scrub, và CLI từ chối chạy nếu thiếu bubblewrap. `AGENT_SUBPROCESS_ENV_SCRUB=auto` (mặc định) chỉ bật khi có `bwrap`. Trong container, bubblewrap cần user namespaces; nếu runtime không cho phép, đặt `0`.
-- **Giới hạn còn lại (quan trọng)**: agent và `pnpm install`/`pnpm verify` (chạy code agent vừa viết) chạy **cùng user OS** với orchestrator, nên code độc hại có thể đọc `/proc/<pid>/environ` của process orchestrator và lấy `GITHUB_TOKEN`, dù env của child đã được lọc. Trên production bắt buộc:
-  1. Chạy worker trong container (hoặc VM) chỉ dành cho việc này, với user không phải root (Dockerfile ở trên), không mount gì ngoài volume `/data`, và token fine-grained chỉ cho repo này.
-  2. Tốt hơn nữa: chạy agent và `pnpm verify` dưới một uid khác (ví dụ user `agent` không có quyền đọc `/proc` của uid `factory`, hoặc mount `/proc` với `hidepid=2`), hoặc tách push/PR sang một service khác giữ token. Orchestrator hiện chưa tự làm việc này.
+- **Giới hạn còn lại**: xem mục [Trust boundary](#trust-boundary) ngay dưới. Các kiểm tra ở trên chặn agent thông qua **tool** của nó; chúng không chặn được **code** mà agent viết ra khi code đó chạy trong `pnpm test`/`pnpm verify` với cùng user OS.
 - **Token**: dùng **fine-grained personal access token** (hoặc GitHub App) chỉ cho đúng repo này, với quyền **Contents: Read and write**, **Pull requests: Read and write**, **Issues: Read and write** (Metadata: read là mặc định). Không cấp `workflows`, admin hay quyền trên repo khác. Branch `main` vẫn protected, nên token này không merge được gì nếu không có review.
-- Branch push luôn có dạng `agent/issue-<n>` (được kiểm tra trước khi push), dùng `--force-with-lease=refs/heads/<branch>:<sha đã fetch>` để chạy lại một issue có thể thay branch cũ của chính nó (PR đang mở được cập nhật, outcome `pr_updated`), nhưng không đè lên commit mà người khác push sau lần fetch.
+- Branch push luôn có dạng `agent/issue-<n>` (được kiểm tra trước khi push), dùng `--force-with-lease=refs/heads/<branch>:<sha>` với SHA lấy bằng `git ls-remote` lúc `prepare()` (rỗng nếu branch chưa có), để chạy lại một issue có thể thay branch cũ của chính nó (PR đang mở được cập nhật, outcome `pr_updated`), nhưng không đè lên commit mà người khác push sau đó.
+
+## Trust boundary
+
+**Trạng thái: thử nghiệm (experimental). Không chạy orchestrator này trên production theo kiểu cùng uid như hiện tại.**
+
+Agent bị giới hạn bởi tool của nó (allow/deny list, hooks, sparse-checkout). Nhưng code mà agent viết sẽ **chạy** khi orchestrator gọi `pnpm install`/`pnpm test`/`pnpm verify`, và hiện tại nó chạy với **cùng user OS** với process orchestrator. Với kiểu deploy cùng uid, code đó có thể đọc hoặc sửa mọi thứ user này truy cập được:
+
+- `/proc/<pid>/environ` của orchestrator, tức `GITHUB_TOKEN`, `GITHUB_WEBHOOK_SECRET`, `ANTHROPIC_API_KEY`, dù env của child đã được lọc;
+- pnpm store dùng chung (đầu độc package cho các run sau);
+- object store dùng chung của `REPO_DIR` (`.git/objects`, refs, config), **kể cả các object của `holdout/`**: holdout chỉ bị ẩn khỏi tool của agent, không ẩn khỏi code của nó (`git cat-file` trên commit gốc vẫn đọc được);
+- các worktree khác đang chạy song song, file của orchestrator, Redis nếu truy cập được qua mạng.
+
+Các kiểm tra của orchestrator (base SHA trong bộ nhớ, path của từng commit, allowlist git config, `git clean`, push đúng SHA) làm cho việc giả mạo khó hơn, nhưng không phải ranh giới bảo mật khi verify chạy cùng uid.
+
+Vì vậy agent và verify **phải** chạy trong một container dùng một lần cho mỗi run (hoặc ít nhất một uid riêng không có quyền vào file và secret của orchestrator). Thiết kế đích (chưa được implement):
+
+1. Orchestrator (giữ `GITHUB_TOKEN`, Redis, `REPO_DIR`) tạo một bản export sạch của `<baseSha>` không có `holdout/` và không có `.git` dùng chung (ví dụ `git archive` hoặc một clone riêng chỉ chứa commit đó).
+2. Chạy agent trong **container mới cho mỗi run**: chỉ mount thư mục làm việc đó, env chỉ có `ANTHROPIC_API_KEY`, không có Docker socket, không mount pnpm store dùng chung, network chỉ ra Anthropic API và npm registry. Container bị huỷ khi xong.
+3. Orchestrator lấy kết quả ra dưới dạng commit (bundle hoặc fetch từ thư mục đó) vào clone của chính nó, **không chạy** gì từ kết quả.
+4. Kiểm tra path của từng commit, ancestry so với `<baseSha>` và config ngay trên clone của orchestrator, rồi chạy `pnpm install --frozen-lockfile` + `pnpm verify` trong **một container mới khác**, checkout đúng `<headSha>`, không secret, không network ngoài registry.
+5. Chỉ khi tất cả đạt, orchestrator push đúng `<headSha>` và mở PR bằng token mà không container nào nhìn thấy.
+
+Cho tới khi có thiết kế đó, chỉ chạy orchestrator cho repo và issue mà bạn tin tưởng, trong VM/container riêng chỉ dành cho nó, với token fine-grained chỉ cho repo này.

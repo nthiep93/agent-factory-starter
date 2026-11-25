@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger } from "@nestjs/common";
 import { AGENT_RUNNER, type AgentRunResult, type AgentRunner } from "../agent/agent-runner.js";
-import { makeRedactor, type Redact } from "../common/redact.js";
+import { makeRedactor, redactDeep, type Redact } from "../common/redact.js";
 import { APP_CONFIG, secretValues, type OrchestratorConfig } from "../config/config.js";
 import {
   GITHUB_CLIENT,
@@ -22,7 +22,7 @@ const BASE_BRANCH = "main";
 const MAX_LISTED_PATHS = 20;
 
 type RecordParts = Partial<
-  Pick<RunRecord, "verify" | "commits" | "pullRequest" | "blockedPaths">
+  Pick<RunRecord, "verify" | "commits" | "pullRequest" | "blockedPaths" | "headSha">
 > & {
   agent: AgentRunResult;
 };
@@ -48,29 +48,18 @@ export class TaskPipeline {
     this.redact = makeRedactor(secretValues(config));
   }
 
-  async execute(task: TaskJobData): Promise<RunRecord> {
+  async execute(rawTask: TaskJobData): Promise<RunRecord> {
+    // Redact the issue text once, before anything slices it (PR title, prompt echo).
+    const task: TaskJobData = {
+      ...rawTask,
+      title: this.redact(rawTask.title),
+      body: this.redact(rawTask.body),
+    };
     const n = task.issueNumber;
     const startedAt = new Date().toISOString();
     const branch = `agent/issue-${n}`;
-    const record = (outcome: RunOutcome, parts: RecordParts): RunRecord => ({
-      issueNumber: n,
-      branch,
-      outcome,
-      agent: {
-        ok: parts.agent.ok,
-        subtype: parts.agent.subtype,
-        costUsd: parts.agent.costUsd,
-        numTurns: parts.agent.numTurns,
-      },
-      verify: parts.verify
-        ? { passed: parts.verify.passed, summary: this.redact(parts.verify.summary) }
-        : null,
-      commits: parts.commits ?? 0,
-      blockedPaths: parts.blockedPaths ?? [],
-      pullRequest: parts.pullRequest ?? null,
-      startedAt,
-      finishedAt: new Date().toISOString(),
-    });
+    const record = (outcome: RunOutcome, parts: RecordParts): RunRecord =>
+      redactDeep(this.buildRecord(outcome, parts, n, branch, startedAt), this.redact);
     const kept = `Nothing was pushed; the local branch \`${branch}\` is kept on the orchestrator host for inspection.`;
 
     let ws: PreparedWorkspace | undefined;
@@ -83,12 +72,14 @@ export class TaskPipeline {
       ws = await this.workspace.prepare(n);
       this.log(`issue #${n}: worktree ready at ${ws.dir}`);
 
-      const agent = await this.runner.run({
+      const rawAgent = await this.runner.run({
         cwd: ws.dir,
         prompt: buildTaskPrompt(task),
         maxTurns: this.config.agentMaxTurns,
         maxBudgetUsd: this.config.agentMaxBudgetUsd,
       });
+      // Redact before quote()/prBody() cut the summary.
+      const agent = { ...rawAgent, summary: this.redact(rawAgent.summary) };
       this.log(
         `issue #${n}: agent ${agent.subtype}, ${agent.numTurns} turns, $${agent.costUsd.toFixed(2)}`,
       );
@@ -110,7 +101,9 @@ export class TaskPipeline {
         return record("dirty_tree", { agent });
       }
 
-      const files = await this.workspace.changedFiles(ws.dir);
+      // From here on everything refers to this exact commit, never to refs.
+      const head = await this.workspace.headSha(ws);
+      const files = await this.workspace.changedFiles(ws, head);
       const forbidden = protectedPaths(files);
       if (forbidden.length > 0) {
         await this.comment(
@@ -118,7 +111,7 @@ export class TaskPipeline {
           `The branch changes protected paths (CI, agent configuration, holdout or agent instructions), ` +
             `which only humans may change:\n\n${pathList(forbidden)}\n\n${kept}`,
         );
-        return record("protected_paths", { agent, blockedPaths: forbidden });
+        return record("protected_paths", { agent, headSha: head, blockedPaths: forbidden });
       }
       const verifyConfig = verifyConfigPaths(files);
       if (verifyConfig.length > 0) {
@@ -128,17 +121,21 @@ export class TaskPipeline {
             `TypeScript or build config, scripts/), so an automatic verify would not be trustworthy. ` +
             `A human needs to review it:\n\n${pathList(verifyConfig)}\n\n${kept}`,
         );
-        return record("verify_config_changed", { agent, blockedPaths: verifyConfig });
+        return record("verify_config_changed", {
+          agent,
+          headSha: head,
+          blockedPaths: verifyConfig,
+        });
       }
 
-      const commits = await this.workspace.commitsAhead(ws.dir);
+      const commits = await this.workspace.commitsAhead(ws, head);
       if (commits === 0) {
         await this.comment(
           n,
           `The agent finished after ${costLine(agent)} but made no commits, so there is nothing to open a PR for.` +
             quote(agent.summary),
         );
-        return record("no_commits", { agent, commits });
+        return record("no_commits", { agent, commits, headSha: head });
       }
 
       const verify = await this.workspace.verify(ws.dir);
@@ -148,10 +145,10 @@ export class TaskPipeline {
           `The agent finished, but the orchestrator's own \`pnpm verify\` failed: \`${oneLine(verify.summary)}\`. ` +
             `Nothing was pushed; the local branch \`${branch}\` (${commits} commit(s)) is kept for inspection.`,
         );
-        return record("verify_failed", { agent, verify, commits });
+        return record("verify_failed", { agent, verify, commits, headSha: head });
       }
 
-      await this.workspace.push(ws.dir, branch);
+      await this.workspace.push(ws, head);
       const { pullRequest, created } = await this.openOrFindPullRequest(task, branch, {
         agent,
         verify,
@@ -169,8 +166,15 @@ export class TaskPipeline {
         this.logger.error(this.redact(`issue #${n}: could not comment the PR link: ${String(e)}`)),
       );
       this.log(`issue #${n}: ${created ? "opened" : "updated"} PR #${pullRequest.number}`);
-      return record(created ? "pr_opened" : "pr_updated", { agent, verify, commits, pullRequest });
+      return record(created ? "pr_opened" : "pr_updated", {
+        agent,
+        verify,
+        commits,
+        headSha: head,
+        pullRequest,
+      });
     } catch (error) {
+      // Redact before the 500-character cut below.
       const message = this.redact(error instanceof Error ? error.message : String(error));
       this.logger.error(`issue #${n}: run failed: ${message}`);
       await this.comment(n, `The agent run failed: \`${oneLine(message).slice(0, 500)}\``).catch(
@@ -192,6 +196,33 @@ export class TaskPipeline {
           );
       }
     }
+  }
+
+  private buildRecord(
+    outcome: RunOutcome,
+    parts: RecordParts,
+    issueNumber: number,
+    branch: string,
+    startedAt: string,
+  ): RunRecord {
+    return {
+      issueNumber,
+      branch,
+      outcome,
+      agent: {
+        ok: parts.agent.ok,
+        subtype: parts.agent.subtype,
+        costUsd: parts.agent.costUsd,
+        numTurns: parts.agent.numTurns,
+      },
+      verify: parts.verify ?? null,
+      commits: parts.commits ?? 0,
+      headSha: parts.headSha ?? null,
+      blockedPaths: parts.blockedPaths ?? [],
+      pullRequest: parts.pullRequest ?? null,
+      startedAt,
+      finishedAt: new Date().toISOString(),
+    };
   }
 
   /**

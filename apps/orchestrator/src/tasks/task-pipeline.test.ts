@@ -4,7 +4,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AGENT_RUNNER } from "../agent/agent-runner.js";
 import { APP_CONFIG } from "../config/config.js";
 import { GITHUB_CLIENT } from "../github/github-client.js";
-import { FakeAgentRunner, FakeGitHubClient, FakeWorkspace, testConfig } from "../testing/fakes.js";
+import {
+  FAKE_HEAD_SHA,
+  FakeAgentRunner,
+  FakeGitHubClient,
+  FakeWorkspace,
+  testConfig,
+} from "../testing/fakes.js";
 import { WORKSPACE } from "../workspace/workspace.js";
 import { TaskPipeline } from "./task-pipeline.js";
 import type { TaskJobData } from "./task.types.js";
@@ -64,10 +70,11 @@ describe("TaskPipeline", () => {
     expect(workspace.events).toEqual([
       "prepare:7",
       `isClean:${DIR}`,
-      `changedFiles:${DIR}`,
-      `commitsAhead:${DIR}`,
+      `headSha:${DIR}`,
+      `changedFiles:${DIR}@${FAKE_HEAD_SHA}`,
+      `commitsAhead:${DIR}@${FAKE_HEAD_SHA}`,
       `verify:${DIR}`,
-      `push:${DIR}:agent/issue-7`,
+      `push:${DIR}:agent/issue-7@${FAKE_HEAD_SHA}`,
       `cleanup:${DIR}`,
     ]);
 
@@ -88,6 +95,7 @@ describe("TaskPipeline", () => {
       branch: "agent/issue-7",
       outcome: "pr_opened",
       commits: 1,
+      headSha: FAKE_HEAD_SHA,
       blockedPaths: [],
       verify: { passed: true, summary: "Tasks:    6 successful, 6 total" },
       agent: { ok: true, subtype: "success", costUsd: 0.42, numTurns: 9 },
@@ -123,6 +131,39 @@ describe("TaskPipeline", () => {
     );
     expect(error.message).toBe("spawn failed with GITHUB_TOKEN=[REDACTED]");
     expect(github.comments.at(-1)?.body).not.toContain(TOKEN);
+  });
+
+  it("redacts before truncating: secrets straddling the summary, quote and title cuts", async () => {
+    // PR body keeps 10 000 summary characters, quote() 1 500, the title 200.
+    runner.result = { ...runner.result, summary: `${"s".repeat(9_995)}${TOKEN} tail` };
+    await pipeline.execute({ ...job, title: `${"t".repeat(195)}${TOKEN}` });
+    const body = github.pullRequests[0]?.body ?? "";
+    expect(body).not.toContain(TOKEN.slice(0, 5));
+    expect(github.pullRequests[0]?.title).not.toContain(TOKEN.slice(0, 5));
+
+    runner.result = {
+      ok: false,
+      subtype: "error_during_execution",
+      costUsd: 0,
+      numTurns: 1,
+      summary: `${"q".repeat(1_495)}${TOKEN}`,
+    };
+    await pipeline.execute(job);
+    expect(github.comments.at(-1)?.body).not.toContain(TOKEN.slice(0, 5));
+  });
+
+  it("a blocked path containing a secret is redacted in the record and the comment", async () => {
+    workspace.changed = [`.github/${TOKEN}.yml`];
+    const record = await pipeline.execute(job);
+    expect(record.blockedPaths).toEqual([".github/[REDACTED].yml"]);
+    expect(github.comments.at(-1)?.body).not.toContain(TOKEN);
+  });
+
+  it("HEAD not descending from the base fails the run before any push", async () => {
+    workspace.headError = new Error("HEAD x does not descend from the fetched base y");
+    await expect(pipeline.execute(job)).rejects.toThrow(/does not descend/);
+    expect(workspace.events.some((e) => e.startsWith("push:"))).toBe(false);
+    expect(workspace.events.at(-1)).toBe(`cleanup:${DIR}`);
   });
 
   it("verify failure: no push, no PR, comments the failing line", async () => {
