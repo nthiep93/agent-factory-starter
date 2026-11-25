@@ -4,7 +4,8 @@ import {
   type SDKMessage,
   type SDKResultMessage,
 } from "@anthropic-ai/claude-agent-sdk";
-import { withoutSecrets } from "../common/safe-env.js";
+import { ORCHESTRATOR_SECRETS, withoutSecrets } from "../common/safe-env.js";
+import { ENV_SCRUB_VARIABLE } from "./env-scrub.js";
 import type { AgentRunInput, AgentRunResult, AgentRunner } from "./agent-runner.js";
 
 /** Exactly the commands the agent may run without asking (no one is there to ask). */
@@ -53,6 +54,8 @@ export class ClaudeAgentRunner implements AgentRunner {
   constructor(
     private readonly queryFn: QueryFn = query,
     private readonly baseEnv: NodeJS.ProcessEnv = process.env,
+    /** Sets CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 (needs bubblewrap, see env-scrub.ts). */
+    private readonly envScrub = false,
   ) {}
 
   async run(input: AgentRunInput): Promise<AgentRunResult> {
@@ -67,7 +70,7 @@ export class ClaudeAgentRunner implements AgentRunner {
       maxBudgetUsd: input.maxBudgetUsd,
       systemPrompt: { type: "preset", preset: "claude_code", append: APPEND_SYSTEM_PROMPT },
       // Replaces the inherited environment: the agent keeps ANTHROPIC_API_KEY, never the GitHub token.
-      env: withoutSecrets(this.baseEnv),
+      env: this.agentEnv(),
     };
 
     let result: SDKResultMessage | undefined;
@@ -91,5 +94,11 @@ export class ClaudeAgentRunner implements AgentRunner {
       numTurns: result.num_turns,
       summary: result.subtype === "success" ? result.result : result.errors.join("\n"),
     };
+  }
+
+  private agentEnv(): Record<string, string> {
+    const env = withoutSecrets(this.baseEnv, [...ORCHESTRATOR_SECRETS, ENV_SCRUB_VARIABLE]);
+    if (this.envScrub) env[ENV_SCRUB_VARIABLE] = "1";
+    return env;
   }
 }

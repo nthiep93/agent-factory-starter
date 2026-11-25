@@ -74,8 +74,10 @@ export class WebhooksService {
 
     const expectedRepo = `${this.config.repository.owner}/${this.config.repository.repo}`;
     const repo = isObject(payload.repository) ? payload.repository.full_name : undefined;
-    if (typeof repo === "string" && repo.toLowerCase() !== expectedRepo.toLowerCase()) {
-      return ignored(`repository ${repo} is not ${expectedRepo}`);
+    if (typeof repo !== "string" || repo.toLowerCase() !== expectedRepo.toLowerCase()) {
+      return ignored(
+        `repository ${typeof repo === "string" ? repo : "(missing)"} is not ${expectedRepo}`,
+      );
     }
 
     const issue = payload.issue;

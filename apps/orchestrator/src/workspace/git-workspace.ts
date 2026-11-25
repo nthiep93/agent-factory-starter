@@ -1,14 +1,17 @@
-import { mkdir, rm } from "node:fs/promises";
-import { join, relative, resolve, isAbsolute } from "node:path";
+import { mkdir, readdir, rm, stat } from "node:fs/promises";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { ORCHESTRATOR_SECRETS, withoutSecrets } from "../common/safe-env.js";
 import { SpawnCommandRunner, type CommandResult, type CommandRunner } from "./command-runner.js";
+import { Mutex } from "./mutex.js";
 import type { PreparedWorkspace, VerifyResult, Workspace } from "./workspace.js";
 
 export interface GitWorkspaceOptions {
   repoDir: string;
   worktreesDir: string;
+  /** Where branches are pushed, e.g. https://github.com/<owner>/<repo>.git. Never a remote name. */
+  pushUrl: string;
   baseBranch?: string;
-  /** Used only for `git push`, passed through git's env config, never argv. */
+  /** Sent as an HTTP header through git's env config for fetch and push, never in argv. */
   pushToken?: string;
   /** Environment to derive child environments from. Defaults to process.env. */
   env?: NodeJS.ProcessEnv;
@@ -18,16 +21,22 @@ export interface GitWorkspaceOptions {
 
 const AGENT_BRANCH = /^agent\/issue-[1-9][0-9]*$/;
 const GIT_TIMEOUT_MS = 5 * 60_000;
+/** Prepended to every git command: no hooks, no fsmonitor daemon, whatever the repo config says. */
+const SAFE_GIT_FLAGS = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor="];
+/** Repo-level settings that would run code or redirect pushes. */
+const RISKY_CONFIG = "^(core\\.hookspath|core\\.fsmonitor|remote\\..*\\.pushurl)$";
 
 /**
  * Git worktrees under WORKTREES_DIR, created from REPO_DIR. Every command runs
  * through {@link CommandRunner} with an argument array; only the issue number
- * (an integer) and derived names ever reach git.
+ * (an integer) and derived names ever reach git. Commands that change REPO_DIR
+ * itself (fetch, worktree add/remove/prune, sparse-checkout) run one at a time.
  */
 export class GitWorkspace implements Workspace {
   private readonly baseBranch: string;
   private readonly worktreesDir: string;
-  /** For git: no GitHub token or webhook secret. */
+  private readonly repoLock = new Mutex();
+  /** For git: no secrets, no system or global git config. */
   private readonly gitEnv: Record<string, string>;
   /** For pnpm, which runs code the agent wrote: no API keys at all. */
   private readonly pnpmEnv: Record<string, string>;
@@ -39,7 +48,12 @@ export class GitWorkspace implements Workspace {
     const env = options.env ?? process.env;
     this.baseBranch = options.baseBranch ?? "main";
     this.worktreesDir = resolve(options.worktreesDir);
-    this.gitEnv = { ...withoutSecrets(env), GIT_TERMINAL_PROMPT: "0" };
+    this.gitEnv = {
+      ...withoutSecrets(env),
+      GIT_TERMINAL_PROMPT: "0",
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: "/dev/null",
+    };
     this.pnpmEnv = {
       ...withoutSecrets(env, [...ORCHESTRATOR_SECRETS, "ANTHROPIC_API_KEY"]),
       FORCE_COLOR: "0",
@@ -58,10 +72,16 @@ export class GitWorkspace implements Workspace {
     // A crashed earlier run may have left the worktree behind.
     await this.cleanup(dir);
 
-    const repo = this.options.repoDir;
-    await this.git(repo, ["fetch", "--prune", "origin"]);
-    // -B resets the branch if an earlier run of the same issue created it.
-    await this.git(repo, ["worktree", "add", "-B", branch, dir, `origin/${this.baseBranch}`]);
+    await this.repoLock.run(async () => {
+      const repo = this.options.repoDir;
+      await this.assertSafeRepo();
+      await this.git(repo, ["fetch", "--prune", "origin"], this.authEnv());
+      // -B resets the branch if an earlier run of the same issue created it.
+      await this.git(repo, ["worktree", "add", "-B", branch, dir, `origin/${this.baseBranch}`]);
+      // holdout/ never reaches the agent's disk. Sparse entries are skip-worktree
+      // in the index, so commits made here keep the holdout files on the branch.
+      await this.git(dir, ["sparse-checkout", "set", "--no-cone", "/*", "!/holdout/"]);
+    });
 
     const install = await this.runner.run(
       "pnpm",
@@ -72,6 +92,26 @@ export class GitWorkspace implements Workspace {
       throw new Error(`pnpm install failed (exit ${install.code}): ${tail(install.output)}`);
     }
     return { dir, branch };
+  }
+
+  async isClean(dir: string): Promise<boolean> {
+    this.assertInside(dir);
+    const result = await this.git(dir, ["status", "--porcelain"]);
+    return result.output.trim() === "";
+  }
+
+  async changedFiles(dir: string): Promise<string[]> {
+    this.assertInside(dir);
+    const result = await this.git(dir, [
+      "diff",
+      "--name-only",
+      "--no-renames",
+      `origin/${this.baseBranch}...HEAD`,
+    ]);
+    return result.output
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
   }
 
   async verify(dir: string): Promise<VerifyResult> {
@@ -98,30 +138,81 @@ export class GitWorkspace implements Workspace {
     if (!AGENT_BRANCH.test(branch)) {
       throw new Error(`Refusing to push "${branch}": only agent/issue-<n> branches are pushed`);
     }
-    // --force-with-lease: a re-run may replace its own earlier branch, but only
-    // if nobody pushed to it since the fetch in prepare().
+    await this.assertSafeRepo();
+    // Lease on what prepare() fetched: a re-run may replace its own earlier
+    // branch, but never commits someone pushed since. Empty = must not exist.
+    const tracking = await this.runner.run(
+      "git",
+      [...SAFE_GIT_FLAGS, "rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`],
+      { cwd: dir, env: this.gitEnv, timeoutMs: GIT_TIMEOUT_MS },
+    );
+    const expected = tracking.code === 0 ? tracking.output.trim() : "";
     await this.git(
       dir,
-      ["push", `--force-with-lease=refs/heads/${branch}`, "origin", `HEAD:refs/heads/${branch}`],
-      this.pushEnv(),
+      [
+        "push",
+        "--no-verify",
+        `--force-with-lease=refs/heads/${branch}:${expected}`,
+        this.options.pushUrl,
+        `HEAD:refs/heads/${branch}`,
+      ],
+      this.authEnv(),
     );
   }
 
   async cleanup(dir: string): Promise<void> {
     this.assertInside(dir);
     const repo = this.options.repoDir;
-    // Ignore failures: the worktree may not exist or may be half-created.
-    await this.runner.run("git", ["worktree", "remove", "--force", dir], {
-      cwd: repo,
-      env: this.gitEnv,
-      timeoutMs: GIT_TIMEOUT_MS,
+    await this.repoLock.run(async () => {
+      // Ignore failures: the worktree may not exist or may be half-created.
+      await this.runner.run("git", [...SAFE_GIT_FLAGS, "worktree", "remove", "--force", dir], {
+        cwd: repo,
+        env: this.gitEnv,
+        timeoutMs: GIT_TIMEOUT_MS,
+      });
+      await rm(dir, { recursive: true, force: true });
+      await this.runner.run("git", [...SAFE_GIT_FLAGS, "worktree", "prune"], {
+        cwd: repo,
+        env: this.gitEnv,
+        timeoutMs: GIT_TIMEOUT_MS,
+      });
     });
-    await rm(dir, { recursive: true, force: true });
-    await this.runner.run("git", ["worktree", "prune"], {
-      cwd: repo,
-      env: this.gitEnv,
-      timeoutMs: GIT_TIMEOUT_MS,
-    });
+  }
+
+  /**
+   * Refuses to work with a REPO_DIR that has executable hooks or config that
+   * runs code or redirects pushes. The -c flags already neutralise most of it;
+   * this makes a tampered clone fail loudly instead.
+   */
+  private async assertSafeRepo(): Promise<void> {
+    const repo = this.options.repoDir;
+    const problems: string[] = [];
+
+    const commonDir = (await this.git(repo, ["rev-parse", "--git-common-dir"])).output.trim();
+    const hooksDir = resolve(repo, commonDir, "hooks");
+    const entries = await readdir(hooksDir).catch(() => [] as string[]);
+    for (const name of entries) {
+      if (name.endsWith(".sample")) continue;
+      const info = await stat(join(hooksDir, name)).catch(() => null);
+      if (info?.isFile() && (info.mode & 0o111) !== 0) problems.push(`executable hook ${name}`);
+    }
+
+    const config = await this.runner.run(
+      "git",
+      [...SAFE_GIT_FLAGS, "config", "--local", "--get-regexp", RISKY_CONFIG],
+      { cwd: repo, env: this.gitEnv, timeoutMs: GIT_TIMEOUT_MS },
+    );
+    if (config.code === 0) {
+      for (const line of config.output.split("\n").filter(Boolean)) {
+        problems.push(`config ${line.split(" ")[0]}`);
+      }
+    }
+
+    if (problems.length > 0) {
+      throw new Error(
+        `Refusing to use REPO_DIR: ${problems.join(", ")}. Remove them from the orchestrator's clone.`,
+      );
+    }
   }
 
   private async git(
@@ -129,7 +220,11 @@ export class GitWorkspace implements Workspace {
     args: string[],
     env: Record<string, string> = this.gitEnv,
   ): Promise<CommandResult> {
-    const result = await this.runner.run("git", args, { cwd, env, timeoutMs: GIT_TIMEOUT_MS });
+    const result = await this.runner.run("git", [...SAFE_GIT_FLAGS, ...args], {
+      cwd,
+      env,
+      timeoutMs: GIT_TIMEOUT_MS,
+    });
     if (result.code !== 0) {
       throw new Error(`git ${args[0]} failed (exit ${result.code}): ${tail(result.output)}`);
     }
@@ -137,7 +232,7 @@ export class GitWorkspace implements Workspace {
   }
 
   /** Token as an HTTP header via GIT_CONFIG_* env, so it never shows up in argv or remotes. */
-  private pushEnv(): Record<string, string> {
+  private authEnv(): Record<string, string> {
     const token = this.options.pushToken;
     if (!token) return this.gitEnv;
     const basic = Buffer.from(`x-access-token:${token}`).toString("base64");

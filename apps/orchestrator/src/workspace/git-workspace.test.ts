@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -65,13 +65,20 @@ describe("GitWorkspace against a real git origin and clone", () => {
     git(root, "init", "-q", "--bare", "-b", "main", origin);
     git(root, "clone", "-q", origin, repoDir);
     await writeFile(join(repoDir, "README.md"), "hello\n");
-    git(repoDir, "add", "README.md");
+    await mkdir(join(repoDir, "holdout"));
+    await writeFile(join(repoDir, "holdout", "scenario.md"), "secret acceptance test\n");
+    git(repoDir, "add", "README.md", "holdout/scenario.md");
     git(repoDir, "commit", "-q", "-m", "initial");
     git(repoDir, "push", "-q", "origin", "HEAD:main");
 
     runner = new StubPnpmRunner();
     workspace = new GitWorkspace(
-      { repoDir, worktreesDir, env: { PATH: process.env.PATH ?? "", GITHUB_TOKEN: "ghp_x" } },
+      {
+        repoDir,
+        worktreesDir,
+        pushUrl: origin,
+        env: { PATH: process.env.PATH ?? "", GITHUB_TOKEN: "ghp_x" },
+      },
       runner,
     );
   });
@@ -178,6 +185,100 @@ describe("GitWorkspace against a real git origin and clone", () => {
       summary: "ELIFECYCLE failed",
     });
     await workspace.cleanup(ws.dir);
+  });
+});
+
+describe("GitWorkspace safety checks against a real git setup", () => {
+  let root: string;
+  let origin: string;
+  let repoDir: string;
+  let workspace: GitWorkspace;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "orchestrator-ws-"));
+    origin = join(root, "origin.git");
+    repoDir = join(root, "repo");
+    git(root, "init", "-q", "--bare", "-b", "main", origin);
+    git(root, "clone", "-q", origin, repoDir);
+    await writeFile(join(repoDir, "README.md"), "hello\n");
+    await mkdir(join(repoDir, "holdout"));
+    await writeFile(join(repoDir, "holdout", "scenario.md"), "secret\n");
+    git(repoDir, "add", "-A");
+    git(repoDir, "commit", "-q", "-m", "initial");
+    git(repoDir, "push", "-q", "origin", "HEAD:main");
+    workspace = new GitWorkspace(
+      { repoDir, worktreesDir: join(root, "worktrees"), pushUrl: origin },
+      new StubPnpmRunner(),
+    );
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("keeps holdout/ off disk and a commit of everything does not delete it on the branch", async () => {
+    const ws = await workspace.prepare(4);
+    expect(existsSync(join(ws.dir, "holdout"))).toBe(false);
+    expect(existsSync(join(ws.dir, "README.md"))).toBe(true);
+    expect(await workspace.isClean(ws.dir)).toBe(true);
+
+    await writeFile(join(ws.dir, "README.md"), "changed\n");
+    git(ws.dir, "add", "-A");
+    git(ws.dir, "commit", "-q", "-m", "change everything");
+    await workspace.push(ws.dir, ws.branch);
+
+    expect(git(origin, "ls-tree", "-r", "--name-only", "refs/heads/agent/issue-4")).toContain(
+      "holdout/scenario.md",
+    );
+    expect(await workspace.changedFiles(ws.dir)).toEqual(["README.md"]);
+    await workspace.cleanup(ws.dir);
+  });
+
+  it("reports a dirty tree and lists changed files", async () => {
+    const ws = await workspace.prepare(5);
+    await mkdir(join(ws.dir, ".github"));
+    await writeFile(join(ws.dir, ".github", "ci.yml"), "x\n");
+    expect(await workspace.isClean(ws.dir)).toBe(false);
+    git(ws.dir, "add", ".github/ci.yml");
+    git(ws.dir, "commit", "-q", "-m", "ci");
+    expect(await workspace.isClean(ws.dir)).toBe(true);
+    expect(await workspace.changedFiles(ws.dir)).toEqual([".github/ci.yml"]);
+    await workspace.cleanup(ws.dir);
+  });
+
+  it("refuses a REPO_DIR with an executable hook", async () => {
+    const hook = join(repoDir, ".git", "hooks", "pre-push");
+    await writeFile(hook, "#!/bin/sh\nexit 0\n");
+    await chmod(hook, 0o755);
+    await expect(workspace.prepare(6)).rejects.toThrow(/executable hook pre-push/);
+  });
+
+  it("refuses a REPO_DIR with core.hooksPath, core.fsmonitor or a pushurl", async () => {
+    for (const [key, value] of [
+      ["core.hooksPath", "/tmp/hooks"],
+      ["core.fsmonitor", "/tmp/monitor"],
+      ["remote.origin.pushurl", "https://example.com/evil.git"],
+    ] as const) {
+      git(repoDir, "config", key, value);
+      await expect(workspace.prepare(6)).rejects.toThrow(new RegExp(key, "i"));
+      git(repoDir, "config", "--unset", key);
+    }
+    const ws = await workspace.prepare(6);
+    await workspace.cleanup(ws.dir);
+  });
+
+  it("serializes repo-level git commands: concurrent prepares both succeed", async () => {
+    const [a, b, c] = await Promise.all([
+      workspace.prepare(11),
+      workspace.prepare(12),
+      workspace.prepare(13),
+    ]);
+    for (const ws of [a, b, c]) {
+      expect(git(ws.dir, "branch", "--show-current")).toBe(ws.branch);
+      expect(existsSync(join(ws.dir, "README.md"))).toBe(true);
+    }
+    await Promise.all([a, b, c].map((ws) => workspace.cleanup(ws.dir)));
+    expect(git(repoDir, "worktree", "list").split("\n")).toHaveLength(1);
   });
 });
 

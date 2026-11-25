@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ConfigError, loadConfig, redactConfig } from "./config.js";
+import { ConfigError, loadConfig, redactConfig, secretValues } from "./config.js";
 
 const valid = {
   GITHUB_WEBHOOK_SECRET: "whsec",
@@ -26,6 +26,8 @@ describe("loadConfig", () => {
       agentMaxBudgetUsd: 3,
       agentConcurrency: 2,
       port: 3100,
+      runsApiToken: null,
+      agentEnvScrub: "auto",
     });
   });
 
@@ -38,6 +40,8 @@ describe("loadConfig", () => {
         AGENT_MAX_BUDGET_USD: "0.5",
         AGENT_CONCURRENCY: "1",
         PORT: "4000",
+        RUNS_API_TOKEN: "runs-token-123",
+        AGENT_SUBPROCESS_ENV_SCRUB: "0",
       },
       exists,
     );
@@ -46,6 +50,28 @@ describe("loadConfig", () => {
     expect(config.agentMaxBudgetUsd).toBe(0.5);
     expect(config.agentConcurrency).toBe(1);
     expect(config.port).toBe(4000);
+    expect(config.runsApiToken).toBe("runs-token-123");
+    expect(config.agentEnvScrub).toBe("off");
+    expect(loadConfig({ ...valid, AGENT_SUBPROCESS_ENV_SCRUB: "1" }, exists).agentEnvScrub).toBe(
+      "on",
+    );
+  });
+
+  it("only accepts owner/repo made of word characters, dots and dashes", () => {
+    for (const bad of ["a/b/c", "a b/c", "a/b?x=1", "../x", "a/..", "owner/"]) {
+      expect(() => loadConfig({ ...valid, GITHUB_REPOSITORY: bad }, exists)).toThrow(
+        /GITHUB_REPOSITORY/,
+      );
+    }
+    expect(
+      loadConfig({ ...valid, GITHUB_REPOSITORY: "my-org.x/repo_1.js" }, exists).repository,
+    ).toEqual({ owner: "my-org.x", repo: "repo_1.js" });
+  });
+
+  it("rejects an unknown AGENT_SUBPROCESS_ENV_SCRUB value", () => {
+    expect(() => loadConfig({ ...valid, AGENT_SUBPROCESS_ENV_SCRUB: "maybe" }, exists)).toThrow(
+      /AGENT_SUBPROCESS_ENV_SCRUB/,
+    );
   });
 
   it("reports every problem at once with the variable names", () => {
@@ -98,6 +124,19 @@ describe("loadConfig", () => {
       expect((e as Error).message).not.toContain("ghp_secret_token");
       expect((e as Error).message).not.toContain("whsec");
     }
+  });
+});
+
+describe("secretValues", () => {
+  it("lists the token, webhook secret, runs token and Anthropic key", () => {
+    const config = loadConfig({ ...valid, RUNS_API_TOKEN: "runs-token-123" }, exists);
+    expect(secretValues(config, { ANTHROPIC_API_KEY: "sk-ant-key" })).toEqual([
+      "ghp_secret_token",
+      "whsec",
+      "runs-token-123",
+      "sk-ant-key",
+    ]);
+    expect(secretValues(loadConfig(valid, exists), {})).toEqual(["ghp_secret_token", "whsec"]);
   });
 });
 

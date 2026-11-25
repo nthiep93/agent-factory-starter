@@ -88,6 +88,27 @@ describe("RestGitHubClient", () => {
     await expect(client(fn).commentOnIssue(1, "x")).rejects.toThrow(/502.*Bad gateway/);
   });
 
+  it("finds the open pull request for a branch with a GET on head=owner:branch", async () => {
+    const { fn, calls } = fakeFetch(200, [
+      { number: 33, html_url: "https://github.com/acme/widgets/pull/33" },
+    ]);
+    expect(await client(fn).findOpenPullRequest("agent/issue-7")).toEqual({
+      number: 33,
+      url: "https://github.com/acme/widgets/pull/33",
+    });
+    expect(calls[0]?.url).toBe(
+      "https://api.github.com/repos/acme/widgets/pulls?head=acme%3Aagent%2Fissue-7&state=open&per_page=1",
+    );
+    expect(calls[0]?.init.method).toBe("GET");
+    expect(calls[0]?.init.body).toBeUndefined();
+    expect(new Headers(calls[0]?.init.headers).get("authorization")).toBe(`Bearer ${TOKEN}`);
+  });
+
+  it("returns null when no open pull request exists for the branch", async () => {
+    const { fn } = fakeFetch(200, []);
+    expect(await client(fn).findOpenPullRequest("agent/issue-7")).toBeNull();
+  });
+
   it("rejects an invalid issue number before calling GitHub", async () => {
     const { fn, calls } = fakeFetch(201, {});
     await expect(client(fn).commentOnIssue(0, "x")).rejects.toThrow(/issue number/);

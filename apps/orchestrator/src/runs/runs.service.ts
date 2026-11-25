@@ -1,4 +1,6 @@
 import { BadRequestException, Inject, Injectable } from "@nestjs/common";
+import { makeRedactor, type Redact } from "../common/redact.js";
+import { APP_CONFIG, secretValues, type OrchestratorConfig } from "../config/config.js";
 import { TASK_QUEUE, type ListedState, type TaskQueue } from "../tasks/task-queue.js";
 import type { RunRecord } from "../tasks/task.types.js";
 
@@ -23,7 +25,14 @@ const iso = (ms: number | null): string | null => (ms ? new Date(ms).toISOString
 /** Recent runs read straight from BullMQ: the queue is the only store. */
 @Injectable()
 export class RunsService {
-  constructor(@Inject(TASK_QUEUE) private readonly queue: TaskQueue) {}
+  private readonly redact: Redact;
+
+  constructor(
+    @Inject(TASK_QUEUE) private readonly queue: TaskQueue,
+    @Inject(APP_CONFIG) config: OrchestratorConfig,
+  ) {
+    this.redact = makeRedactor(secretValues(config));
+  }
 
   async recent(limitParam?: string): Promise<RunView[]> {
     const limit = parseLimit(limitParam);
@@ -37,7 +46,7 @@ export class RunsService {
       startedAt: iso(s.startedAt),
       finishedAt: iso(s.finishedAt),
       record: s.record,
-      failedReason: s.failedReason,
+      failedReason: s.failedReason === null ? null : this.redact(s.failedReason),
     }));
   }
 }

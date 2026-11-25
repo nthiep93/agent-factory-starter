@@ -9,6 +9,7 @@ describe("withoutSecrets", () => {
       GH_TOKEN: "t",
       GITHUB_WEBHOOK_SECRET: "s",
       REDIS_URL: "redis://x",
+      RUNS_API_TOKEN: "r",
       ANTHROPIC_API_KEY: "k",
       EMPTY: undefined,
     });

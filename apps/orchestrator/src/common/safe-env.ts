@@ -4,6 +4,7 @@ export const ORCHESTRATOR_SECRETS = [
   "GH_TOKEN",
   "GITHUB_WEBHOOK_SECRET",
   "REDIS_URL",
+  "RUNS_API_TOKEN",
 ] as const;
 
 /**

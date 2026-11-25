@@ -2,8 +2,9 @@ import "reflect-metadata";
 import { BadRequestException } from "@nestjs/common";
 import { Test } from "@nestjs/testing";
 import { beforeEach, describe, expect, it } from "vitest";
+import { APP_CONFIG } from "../config/config.js";
 import { TASK_QUEUE } from "../tasks/task-queue.js";
-import { FakeTaskQueue } from "../testing/fakes.js";
+import { FakeTaskQueue, testConfig } from "../testing/fakes.js";
 import { RunsController } from "./runs.controller.js";
 import { RunsService } from "./runs.service.js";
 
@@ -23,7 +24,11 @@ describe("RunsController", () => {
     queue = new FakeTaskQueue();
     const moduleRef = await Test.createTestingModule({
       controllers: [RunsController],
-      providers: [RunsService, { provide: TASK_QUEUE, useValue: queue }],
+      providers: [
+        RunsService,
+        { provide: TASK_QUEUE, useValue: queue },
+        { provide: APP_CONFIG, useValue: testConfig({ githubToken: "ghp_test_token" }) },
+      ],
     }).compile();
     controller = moduleRef.get(RunsController);
   });
@@ -38,7 +43,7 @@ describe("RunsController", () => {
         startedAt: Date.UTC(2026, 0, 1, 10, 1),
         finishedAt: Date.UTC(2026, 0, 1, 10, 5),
         record: null,
-        failedReason: "git fetch failed",
+        failedReason: "git fetch failed for ghp_test_token",
       },
       {
         id: "issue-1",
@@ -64,7 +69,7 @@ describe("RunsController", () => {
         startedAt: "2026-01-01T10:01:00.000Z",
         finishedAt: "2026-01-01T10:05:00.000Z",
         record: null,
-        failedReason: "git fetch failed",
+        failedReason: "git fetch failed for [REDACTED]",
       },
       {
         id: "issue-1",

@@ -14,8 +14,16 @@ export interface VerifyResult {
 
 /** Git worktree lifecycle for one issue run. */
 export interface Workspace {
-  /** Fetches origin, creates `agent/issue-<n>` from origin/main in a fresh worktree, installs deps. */
+  /**
+   * Checks REPO_DIR for hooks and risky git config, fetches origin, creates
+   * `agent/issue-<n>` from origin/main in a fresh worktree without holdout/,
+   * and installs dependencies.
+   */
   prepare(issueNumber: number): Promise<PreparedWorkspace>;
+  /** True when `git status --porcelain` is empty. */
+  isClean(dir: string): Promise<boolean>;
+  /** Paths changed on the branch since it left origin/main. */
+  changedFiles(dir: string): Promise<string[]>;
   /** Runs `pnpm verify` in the worktree. Never trusts what the agent said about it. */
   verify(dir: string): Promise<VerifyResult>;
   /** Commits on HEAD that origin/main does not have. */

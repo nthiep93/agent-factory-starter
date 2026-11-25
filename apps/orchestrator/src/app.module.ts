@@ -2,10 +2,12 @@ import { BullModule } from "@nestjs/bullmq";
 import { Module, type DynamicModule } from "@nestjs/common";
 import { AGENT_RUNNER } from "./agent/agent-runner.js";
 import { ClaudeAgentRunner } from "./agent/claude-agent-runner.js";
+import { resolveEnvScrub } from "./agent/env-scrub.js";
 import { APP_CONFIG, type OrchestratorConfig } from "./config/config.js";
 import { GITHUB_CLIENT } from "./github/github-client.js";
 import { RestGitHubClient } from "./github/rest-github-client.js";
 import { HealthController } from "./health/health.controller.js";
+import { RunsAuthGuard } from "./runs/runs-auth.guard.js";
 import { RunsController } from "./runs/runs.controller.js";
 import { RunsService } from "./runs/runs.service.js";
 import { BullTaskQueue, TASK_JOB_OPTIONS } from "./tasks/bull-task-queue.js";
@@ -37,16 +39,24 @@ export class AppModule {
         { provide: APP_CONFIG, useValue: config },
         WebhooksService,
         RunsService,
+        RunsAuthGuard,
         TaskPipeline,
         TaskProcessor,
         { provide: TASK_QUEUE, useClass: BullTaskQueue },
-        { provide: AGENT_RUNNER, useFactory: () => new ClaudeAgentRunner() },
+        {
+          provide: AGENT_RUNNER,
+          useFactory: (c: OrchestratorConfig) =>
+            new ClaudeAgentRunner(undefined, process.env, resolveEnvScrub(c.agentEnvScrub)),
+          inject: [APP_CONFIG],
+        },
         {
           provide: WORKSPACE,
           useFactory: (c: OrchestratorConfig) =>
             new GitWorkspace({
               repoDir: c.repoDir,
               worktreesDir: c.worktreesDir,
+              // Built from the validated owner/repo; never the clone's remote config.
+              pushUrl: `https://github.com/${c.repository.owner}/${c.repository.repo}.git`,
               pushToken: c.githubToken,
             }),
           inject: [APP_CONFIG],

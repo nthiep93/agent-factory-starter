@@ -17,7 +17,14 @@ export interface OrchestratorConfig {
   agentMaxBudgetUsd: number;
   agentConcurrency: number;
   port: number;
+  /** When set, GET /runs requires `Authorization: Bearer <token>`; otherwise loopback only. */
+  runsApiToken: string | null;
+  /** CLAUDE_CODE_SUBPROCESS_ENV_SCRUB for the agent: "auto" turns it on when bubblewrap is installed. */
+  agentEnvScrub: "auto" | "on" | "off";
 }
+
+/** owner/repo, each part letters, digits, `_`, `.` or `-`. */
+export const REPOSITORY_PATTERN = /^([\w.-]+)\/([\w.-]+)$/;
 
 export class ConfigError extends Error {
   constructor(readonly problems: string[]) {
@@ -79,8 +86,10 @@ export function loadConfig(
   const githubToken = required("GITHUB_TOKEN");
 
   const repositoryRaw = required("GITHUB_REPOSITORY");
-  const match = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/.exec(repositoryRaw);
-  if (repositoryRaw && !match) problems.push("GITHUB_REPOSITORY must look like owner/repo");
+  const match = REPOSITORY_PATTERN.exec(repositoryRaw);
+  if (repositoryRaw && (!match || match[1] === ".." || match[2] === "..")) {
+    problems.push("GITHUB_REPOSITORY must look like owner/repo");
+  }
 
   const redisUrl = required("REDIS_URL");
   if (redisUrl && !/^rediss?:\/\//.test(redisUrl)) {
@@ -89,6 +98,19 @@ export function loadConfig(
 
   const repoDir = directory("REPO_DIR", true);
   const worktreesDir = directory("WORKTREES_DIR", false);
+
+  const scrubRaw = (env.AGENT_SUBPROCESS_ENV_SCRUB?.trim() || "auto").toLowerCase();
+  const scrubValues: Record<string, OrchestratorConfig["agentEnvScrub"]> = {
+    auto: "auto",
+    "1": "on",
+    true: "on",
+    on: "on",
+    "0": "off",
+    false: "off",
+    off: "off",
+  };
+  const agentEnvScrub = scrubValues[scrubRaw];
+  if (!agentEnvScrub) problems.push("AGENT_SUBPROCESS_ENV_SCRUB must be auto, 1 or 0");
 
   const positiveInt = (n: number): boolean => Number.isInteger(n) && n > 0;
   const config: OrchestratorConfig = {
@@ -113,6 +135,8 @@ export function loadConfig(
       (n) => Number.isInteger(n) && n > 0 && n < 65536,
       "an integer between 1 and 65535",
     ),
+    runsApiToken: env.RUNS_API_TOKEN?.trim() || null,
+    agentEnvScrub: agentEnvScrub ?? "auto",
   };
 
   if (problems.length > 0) throw new ConfigError(problems);
@@ -131,5 +155,20 @@ export function redactConfig(config: OrchestratorConfig): Record<string, string 
     agentMaxBudgetUsd: config.agentMaxBudgetUsd,
     agentConcurrency: config.agentConcurrency,
     port: config.port,
+    runsApiToken: config.runsApiToken ? "(set)" : "(unset)",
+    agentEnvScrub: config.agentEnvScrub,
   };
+}
+
+/** Values that must never leave the process in comments, PR bodies, job data or logs. */
+export function secretValues(
+  config: OrchestratorConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
+  return [
+    config.githubToken,
+    config.webhookSecret,
+    config.runsApiToken,
+    env.ANTHROPIC_API_KEY,
+  ].filter((v): v is string => typeof v === "string" && v.length > 0);
 }

@@ -1,0 +1,12 @@
+# Used by BuildKit for apps/orchestrator/Dockerfile (build context = repo root).
+**/node_modules
+**/dist
+**/.next
+**/.turbo
+.git
+.claude/worktrees
+.agent-runs
+.env
+.env.*
+!.env.example
+secrets

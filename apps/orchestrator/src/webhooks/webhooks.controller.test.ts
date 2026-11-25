@@ -104,7 +104,7 @@ describe("WebhooksController over HTTP (raw body + signature)", () => {
   });
 
   it("verifies the exact bytes, not a re-serialised body", async () => {
-    const raw = `{ "action":"labeled",  "label":{"name":"agent"},\n "issue":{"number":8,"title":"t","body":null,"labels":[]}}`;
+    const raw = `{ "action":"labeled",  "label":{"name":"agent"},\n "issue":{"number":8,"title":"t","body":null,"labels":[]},\n  "repository":{"full_name":"acme/widgets"}}`;
     const res = await send("issues", null, { rawBody: raw });
     expect(res.status).toBe(202);
     expect(queue.enqueued[0]).toMatchObject({ issueNumber: 8, body: "" });
@@ -138,6 +138,21 @@ describe("WebhooksController over HTTP (raw body + signature)", () => {
     const other = await send("issues", labeledPayload({ repository: { full_name: "evil/repo" } }));
     expect(other.body.ignored).toMatch(/evil\/repo/);
     expect(queue.enqueued).toHaveLength(0);
+  });
+
+  it("ignores a payload without a repository and matches the name case-insensitively", async () => {
+    const missing = labeledPayload();
+    delete missing.repository;
+    expect((await send("issues", missing)).body.ignored).toMatch(/\(missing\)/);
+    const nonString = await send("issues", labeledPayload({ repository: { full_name: 42 } }));
+    expect(nonString.body.ignored).toMatch(/\(missing\)/);
+    expect(queue.enqueued).toHaveLength(0);
+
+    const upper = await send(
+      "issues",
+      labeledPayload({ repository: { full_name: "ACME/Widgets" } }),
+    );
+    expect(upper.body).toEqual({ jobId: "issue-7", deduplicated: false });
   });
 
   it("answers ping with 200", async () => {

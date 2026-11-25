@@ -85,6 +85,21 @@ describe("ClaudeAgentRunner", () => {
     expect(env?.PATH).toBe("/bin");
   });
 
+  it("turns on CLAUDE_CODE_SUBPROCESS_ENV_SCRUB only when asked", async () => {
+    const off = fakeQuery([]);
+    await new ClaudeAgentRunner(off.fn, {
+      PATH: "/bin",
+      CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1",
+      RUNS_API_TOKEN: "runs-token",
+    }).run(input);
+    expect(off.calls[0]?.options?.env?.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB).toBeUndefined();
+    expect(off.calls[0]?.options?.env?.RUNS_API_TOKEN).toBeUndefined();
+
+    const on = fakeQuery([]);
+    await new ClaudeAgentRunner(on.fn, { PATH: "/bin" }, true).run(input);
+    expect(on.calls[0]?.options?.env?.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB).toBe("1");
+  });
+
   it("maps a success result", async () => {
     const { fn } = fakeQuery([
       { type: "system", subtype: "init" },

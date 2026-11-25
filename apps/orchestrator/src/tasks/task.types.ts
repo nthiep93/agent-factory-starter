@@ -11,7 +11,15 @@ export interface TaskJobData {
   deliveryId: string;
 }
 
-export type RunOutcome = "pr_opened" | "agent_error" | "verify_failed" | "no_commits";
+export type RunOutcome =
+  | "pr_opened"
+  | "pr_updated"
+  | "agent_error"
+  | "dirty_tree"
+  | "protected_paths"
+  | "verify_config_changed"
+  | "verify_failed"
+  | "no_commits";
 
 /** Returned by the processor and stored by BullMQ as the job's return value. */
 export interface RunRecord {
@@ -26,6 +34,8 @@ export interface RunRecord {
   } | null;
   verify: { passed: boolean; summary: string } | null;
   commits: number;
+  /** Changed paths that stopped the run (protected_paths, verify_config_changed). */
+  blockedPaths: string[];
   pullRequest: { number: number; url: string } | null;
   startedAt: string;
   finishedAt: string;
