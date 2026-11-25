@@ -40,7 +40,50 @@ describe("scripts/classify-pr.mjs", () => {
     const result = run([], readFileSync(fixture("high.json"), "utf8"));
     expect(result.status).toBe(0);
     expect(result.stdout).toMatch(/^high\n/);
-    expect(result.stdout).toContain("test file deleted: apps/web/lib/api.test.ts");
+    expect(result.stdout).toContain('test file deleted: "apps/web/lib/api.test.ts"');
+  });
+
+  it("cannot be tricked into printing workflow commands by a file name", () => {
+    const evil = [
+      {
+        filename: "docs/a.md\n::set-output name=level::low",
+        status: "modified",
+        additions: 1,
+        deletions: 0,
+      },
+      {
+        filename: "apps/x.ts\r\n::error::boom\u2028::warning::x",
+        status: "modified",
+        additions: 1,
+        deletions: 0,
+      },
+    ];
+    const result = run([], JSON.stringify(evil));
+    expect(result.status).toBe(0);
+    const out = result.stdout.trim().split("\n");
+    expect(out[0]).toBe("high");
+    expect(result.stdout).toContain("control character in file name");
+    // Every line is the level or a reason; no line starts a workflow command.
+    expect(out.slice(1).every((line) => /^(low|medium|high): /.test(line))).toBe(true);
+    expect(out.some((line) => line.startsWith("::"))).toBe(false);
+    expect(result.stdout).not.toMatch(/[\r\u2028\u2029]/);
+  });
+
+  it("--expected-count makes a short file list high", () => {
+    const result = run([fixture("low.json"), "--expected-count", "3"]);
+    expect(result.stdout).toMatch(/^high\n/);
+    expect(result.stdout).toContain("file list incomplete: got 2 files, PR reports 3");
+    expect(run([fixture("low.json"), "--expected-count", "2"]).stdout).toMatch(/^low\n/);
+  });
+
+  it("--mode-change makes the PR high", () => {
+    const result = run([fixture("low.json"), "--mode-change"]);
+    expect(result.stdout).toMatch(/^high\n/);
+    expect(result.stdout).toContain("symlink");
+  });
+
+  it("rejects a bad --expected-count", () => {
+    expect(run([fixture("low.json"), "--expected-count", "x"]).status).toBe(1);
   });
 
   it("fails with exit 1 on input that is not a file list", () => {

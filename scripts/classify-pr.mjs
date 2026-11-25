@@ -1,7 +1,10 @@
 // Classifies a pull request's risk from its changed-file list.
 //
-//   node scripts/classify-pr.mjs files.json
+//   node scripts/classify-pr.mjs files.json [--expected-count N] [--mode-change]
 //   gh api --paginate --slurp repos/OWNER/REPO/pulls/N/files | node scripts/classify-pr.mjs
+//
+// --expected-count N  the PR's changed_files; a list of another length is high
+// --mode-change       the diff adds a symlink or changes a file mode: high
 //
 // Input: the JSON array GitHub's "list pull request files" endpoint returns,
 // or an array of such pages (gh --paginate --slurp). Output: the level
@@ -29,7 +32,19 @@ if (!existsSync(distEntry)) {
 }
 const { classifyRisk } = createRequire(import.meta.url)(distEntry);
 
-const source = process.argv[2];
+let source;
+const context = {};
+const args = process.argv.slice(2);
+for (let i = 0; i < args.length; i++) {
+  const arg = args[i];
+  if (arg === "--mode-change") context.modeOrSymlinkChange = true;
+  else if (arg === "--expected-count") {
+    const n = Number(args[++i]);
+    if (!Number.isInteger(n) || n < 0) fail(1, "--expected-count needs a non-negative integer");
+    context.expectedFileCount = n;
+  } else if (arg.startsWith("--")) fail(1, `unknown option ${arg}`);
+  else source = arg;
+}
 let raw;
 try {
   raw = source && source !== "-" ? readFileSync(source, "utf8") : readFileSync(0, "utf8");
@@ -60,7 +75,14 @@ const { level, reasons } = classifyRisk(
     deletions: Number(f.deletions ?? 0),
     ...(typeof f.previous_filename === "string" ? { previous_filename: f.previous_filename } : {}),
   })),
+  context,
 );
 
+// File names are attacker-controlled. The classifier JSON-quotes them; also
+// drop every control and line-separator character so no output line can
+// start a GitHub Actions workflow command (::set-output::, ::error:: ...).
+// eslint-disable-next-line no-control-regex
+const safe = (line) => line.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ");
+
 out(level);
-for (const reason of reasons) out(reason);
+for (const reason of reasons) out(safe(reason));

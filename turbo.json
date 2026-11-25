@@ -15,6 +15,10 @@
       "dependsOn": ["^build"],
       "cache": false,
       "persistent": true
+    },
+    "@repo/factory#test": {
+      "dependsOn": ["^build"],
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/scripts/classify-pr.mjs"]
     }
   }
 }
