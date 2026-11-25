@@ -23,7 +23,10 @@ Turborepo monorepo, pnpm workspaces, Node 22, TypeScript strict.
 
 - `apps/api`: NestJS 12 backend. One folder per feature under `src/`.
 - `apps/web`: Next.js 16 App Router. Pages in `app/`, pure helpers in `lib/`.
+- `apps/orchestrator`: NestJS 12 service that turns labeled issues into agent runs (BullMQ + Claude Agent SDK). Not deployed to Vercel. See `docs/orchestrator.md`.
 - `packages/shared`: types and pure functions used by both apps.
+- `packages/factory`: tested logic for the factory itself: tasks.md parsing (`src/spec`), PR risk (`src/risk`), agent PR metrics (`src/metrics`). Scripts in `scripts/` load its `dist/`.
+- `specs/`: feature specs written with `/write-spec` (spec.md, plan.md, tasks.md). See `docs/spec-workflow.md`.
 - `docs/`: architecture and conventions. Read the relevant file before a non-trivial change.
 - `holdout/`: acceptance scenarios. Off limits, you cannot read or edit them.
 

@@ -91,6 +91,40 @@ Ngoài luồng trên, anh có thể gõ `@claude ...` trong bất kỳ issue hay
 - Không gắn nhãn `agent` cho việc rủi ro cao (auth, dữ liệu, tiền, bảo mật).
 - Trên PR, action lấy `.claude/`, `CLAUDE.md`, `AGENTS.md` từ nhánh gốc, nên PR không tự nới được guardrail của mình. Tuy vậy, `pnpm verify` vẫn chạy `package.json` của PR với API key trong môi trường. Với repo một người thì chấp nhận được; khi mở repo cho người ngoài, cần siết lại.
 
+## Pha 3: việc lớn đi qua spec
+
+```bash
+# Trong Claude Code: phỏng vấn ngắn rồi viết specs/<NNN>-<slug>/{spec,plan,tasks}.md
+/write-spec thêm endpoint GET /time và hiển thị độ lệch giờ web/api
+
+pnpm build --filter @repo/factory
+node scripts/spec-to-issues.mjs specs/001-time-endpoint            # dry run: kiểm tra + in issue
+node scripts/spec-to-issues.mjs specs/001-time-endpoint --create   # tạo issue bằng gh
+```
+
+- Mỗi task trong `tasks.md` thành một issue theo form **Agent task**. Chạy lại `--create` không tạo trùng, vì script tìm lại issue cũ qua marker ẩn trong nội dung.
+- Task không phụ thuộc gì, rủi ro thấp hoặc trung bình, nhận nhãn `agent` và chạy ngay.
+- Task có phụ thuộc nhận `waiting-on-deps`. Khi mọi issue phụ thuộc đóng ở trạng thái completed, workflow `unblock-tasks` đổi sang `ready-for-agent` và comment nhắc anh. Anh gắn `agent` để giao việc.
+- Task rủi ro cao không bao giờ có đường tự động tới `agent`. Spec nào nhắc `@claude` sẽ bị từ chối, vì `@claude` trong issue mới sẽ tự kích hoạt agent.
+- `node scripts/factory-metrics.mjs --days 14`: tỷ lệ merge, tỷ lệ làm lại, thời gian từ lúc tạo tới merge, thời gian tới review đầu tiên của người, phân theo rủi ro.
+
+Chi tiết: [`docs/spec-workflow.md`](docs/spec-workflow.md).
+
+## Pha 4: cổng kiểm chứng nhiều tầng và orchestrator
+
+### Bốn tầng kiểm chứng
+
+1. **Agent tự kiểm:** hook `Stop`, `pnpm verify` trong chính lần chạy.
+2. **Reviewer độc lập:** subagent `reviewer` khi chạy local, workflow `Claude review` trên PR.
+3. **Check bắt buộc của CI:** `verify` và `holdout`. Holdout là kịch bản nghiệm thu mà agent viết code không đọc được, và trên PR luôn được lấy từ commit gốc.
+4. **Người duyệt theo rủi ro:** workflow `pr-risk` gắn `risk:low|medium|high` bằng code lấy từ nhánh gốc.
+
+Auto-merge cho PR `risk:low` từ nhánh `claude/*` **mặc định tắt**. Cách bật nằm trong [`docs/gates.md`](docs/gates.md).
+
+### Orchestrator
+
+`apps/orchestrator` nhận webhook GitHub (có kiểm chữ ký HMAC), xếp việc vào BullMQ và chạy Claude Agent SDK trong worktree riêng có giới hạn turn và ngân sách. Sau đó orchestrator **tự chạy `pnpm verify`**, từ chối các nhánh đụng vào `.github/`, `.claude/`, `holdout/` hoặc cấu hình verify, rồi mới push và mở PR. Service này chạy dài hạn, cần Redis và git, nên phải chạy trên VM, Render hoặc Fly, trong container có user riêng, không đặt trên Vercel. Chi tiết: [`docs/orchestrator.md`](docs/orchestrator.md).
+
 ## Cấu hình GitHub
 
 - `main` có branch protection: bắt buộc PR và check `verify`.
