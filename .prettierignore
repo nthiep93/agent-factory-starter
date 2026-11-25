@@ -5,3 +5,5 @@ dist
 pnpm-lock.yaml
 # Hidden from agents' format runs (see docs/gates.md)
 holdout
+# Other agents' worktrees: never format another checkout from this one
+.claude/worktrees

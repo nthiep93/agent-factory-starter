@@ -6,6 +6,8 @@ export default tseslint.config(
     // holdout/ is hidden from agents' lint; CI lints it with --no-ignore in the holdout job.
     ignores: [
       "**/dist/**",
+      // Other agents' worktrees: never lint another checkout from this one.
+      ".claude/worktrees/**",
       "**/.next/**",
       "**/node_modules/**",
       "**/next-env.d.ts",
