@@ -50,8 +50,16 @@ const specModule = join(distDir, "spec", "index.js");
 if (!existsSync(specModule)) {
   die(`Compiled @repo/factory not found at ${specModule}.\nRun: pnpm build --filter @repo/factory`);
 }
-const { parseTasks, validateTasks, orderTasks, taskToIssue, WAITING_LABEL, READY_LABEL } =
-  createRequire(import.meta.url)(specModule);
+const {
+  parseTasks,
+  validateTasks,
+  orderTasks,
+  taskToIssue,
+  issueMarker,
+  issueMarkerText,
+  WAITING_LABEL,
+  READY_LABEL,
+} = createRequire(import.meta.url)(specModule);
 
 // Paths in issue bodies are relative to the repo root when the spec lives in it.
 const specPath = resolve(positional[0]);
@@ -143,11 +151,52 @@ for (const name of wanted) {
   }
 }
 
+// An issue whose body contains the task's exact marker line, from an earlier
+// run. Search narrows the candidates; the body check makes the match exact.
+const findExisting = (task) => {
+  const marker = issueMarker(specDir, task.id);
+  const query = `"${issueMarkerText(specDir, task.id)}" in:body`;
+  const hits = JSON.parse(
+    gh([
+      "issue",
+      "list",
+      "--state",
+      "all",
+      "--limit",
+      "20",
+      "--search",
+      query,
+      "--json",
+      "number,body",
+    ]),
+  );
+  const hit = hits.find(
+    (candidate) =>
+      typeof candidate.body === "string" &&
+      candidate.body.split(/\r?\n/).some((line) => line.trim() === marker),
+  );
+  return hit ? Number(hit.number) : null;
+};
+
 const tmp = mkdtempSync(join(tmpdir(), "spec-to-issues-"));
 const numbers = {};
 const created = [];
+const reused = [];
 let failure = null;
 for (const [index, task] of ordered.entries()) {
+  let existing;
+  try {
+    existing = findExisting(task);
+  } catch (error) {
+    failure = ghFailure(`gh issue list (search for ${task.id})`, error);
+    break;
+  }
+  if (existing !== null) {
+    numbers[task.id] = existing;
+    reused.push(`${task.id}=#${existing}`);
+    out(`${index + 1}/${ordered.length} ${task.id} -> #${existing} already exists, skipped`);
+    continue;
+  }
   const issue = taskToIssue(task, { specDir, issueNumbersById: numbers });
   const bodyFile = join(tmp, `${task.id}.md`);
   writeFileSync(bodyFile, issue.body);
@@ -174,4 +223,5 @@ if (failure) {
   const done = created.length ? `Already created: ${created.join(", ")}` : "Nothing was created.";
   die(`${failure}\n${done}`);
 }
-out(`Created ${created.length} issues: ${created.join(", ")}`);
+const all = ordered.map((task) => `${task.id}=#${numbers[task.id]}`).join(", ");
+out(`Created ${created.length} issues, reused ${reused.length}: ${all}`);

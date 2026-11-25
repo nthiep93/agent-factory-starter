@@ -91,6 +91,28 @@ describe("validateTasks", () => {
     ]);
   });
 
+  it("rejects @claude mentions, which would start the agent on issue creation", () => {
+    const errors = validateTasks([
+      task("T1", [], { title: "Ask @Claude to fix", line: 1 }),
+      task("T2", [], { goal: "ping @CLAUDE", line: 2 }),
+      task("T3", [], { inScope: "x @claude", line: 3 }),
+      task("T4", [], { outOfScope: "@claude", line: 4 }),
+      task("T5", [], { acceptance: ["ok", "then @claude reviews"], line: 5 }),
+      task("T6", [], { goal: "mail claude@example.com is fine? no: claude", line: 6 }),
+    ]);
+    expect(errors.map((e) => [e.code, e.taskId, e.line])).toEqual([
+      ["agent-mention", "T1", 1],
+      ["agent-mention", "T2", 2],
+      ["agent-mention", "T3", 3],
+      ["agent-mention", "T4", 4],
+      ["agent-mention", "T5", 5],
+    ]);
+    expect(errors[0]?.message).toBe(
+      'T1 mentions "@claude" in its title: GitHub would start the agent as soon as the issue is created. Remove the mention.',
+    );
+    expect(errors[4]?.message).toContain("in its acceptance criteria");
+  });
+
   it("reports empty acceptance lists and unknown area or risk", () => {
     const errors = validateTasks([
       task("T1", [], { acceptance: [], area: "mobile", risk: "extreme", line: 4 }),

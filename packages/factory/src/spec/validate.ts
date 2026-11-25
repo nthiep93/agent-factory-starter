@@ -7,6 +7,22 @@ import {
   type ValidationError,
 } from "./types";
 
+// claude.yml starts the agent when a new issue's title or body mentions
+// @claude, whatever its labels. A mention would bypass risk and dependency gating.
+const AGENT_MENTION = /@claude/i;
+
+const mentionField = (task: Task): string | null => {
+  const fields: Array<[string, readonly (string | null)[]]> = [
+    ["title", [task.title]],
+    ["goal", [task.goal]],
+    ["in-scope", [task.inScope]],
+    ["out-of-scope", [task.outOfScope]],
+    ["acceptance criteria", task.acceptance],
+  ];
+  const hit = fields.find(([, values]) => values.some((v) => v !== null && AGENT_MENTION.test(v)));
+  return hit ? hit[0] : null;
+};
+
 /** Index of the first task with each id; later duplicates are not indexed. */
 const firstById = (tasks: readonly Task[]): Map<string, Task> => {
   const byId = new Map<string, Task>();
@@ -45,7 +61,8 @@ function findCycles(tasks: readonly Task[]): Task[][] {
 
 /**
  * Checks a parsed task list as a whole: duplicate ids, unknown dependencies,
- * dependency cycles, empty acceptance lists and unknown area or risk values.
+ * dependency cycles, empty acceptance lists, unknown area or risk values, and
+ * "@claude" mentions (they would start the agent when the issue is created).
  * Returns an empty array when the list can be turned into issues.
  */
 export function validateTasks(tasks: readonly Task[]): ValidationError[] {
@@ -86,6 +103,15 @@ export function validateTasks(tasks: readonly Task[]): ValidationError[] {
         taskId: task.id,
         line: task.line,
         message: `${task.id} has unknown area "${task.area}" (allowed: ${TASK_AREAS.join(", ")})`,
+      });
+    }
+    const mention = mentionField(task);
+    if (mention) {
+      errors.push({
+        code: "agent-mention",
+        taskId: task.id,
+        line: task.line,
+        message: `${task.id} mentions "@claude" in its ${mention}: GitHub would start the agent as soon as the issue is created. Remove the mention.`,
       });
     }
     if (!isTaskRisk(task.risk)) {

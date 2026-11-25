@@ -33,13 +33,24 @@ export function buildFactory() {
 
 // Fake gh: records each call's args (one per line) and the --body-file content,
 // answers `label list` from $FAKE_GH_LABELS, `pr list` from the file $FAKE_GH_PRS,
-// `issue list` from the file $FAKE_GH_ISSUES and `issue view <n>` from
+// `issue list` from the file $FAKE_GH_ISSUES, else the JSON in $FAKE_GH_SEARCH, else
+// every issue created so far (marker search), and `issue view <n>` from
 // $FAKE_GH_STATES/<n>.json; `issue edit|comment <n>` fails when n = $FAKE_GH_FAIL_EDIT,
 // and prints https://github.com/o/r/issues/<n> with n = 101, 102, ...
 // $FAKE_GH_FAIL_AT=<n> makes the issue create that would get number n fail.
+// Prints every issue created so far as [{ number, body }] (the search result).
+const LIST_CREATED = [
+  "const fs = require('fs'), path = require('path');",
+  "const dir = path.join(process.argv[1], 'created');",
+  "const files = fs.existsSync(dir) ? fs.readdirSync(dir) : [];",
+  "const issues = files.map((f) => ({ number: Number(f.slice(0, -3)), body: fs.readFileSync(path.join(dir, f), 'utf8') }));",
+  "process.stdout.write(JSON.stringify(issues));",
+].join(" ");
+
 const GH_STUB = `#!/usr/bin/env bash
 set -euo pipefail
 d="$FAKE_GH_DIR"
+LIST_CREATED="${LIST_CREATED}"
 k=$(( $(cat "$d/count" 2>/dev/null || echo 0) + 1 ))
 echo "$k" > "$d/count"
 printf '%s\\n' "$@" > "$d/call-$k.args"
@@ -52,7 +63,12 @@ case "\${1:-} \${2:-}" in
   "label list") echo "\${FAKE_GH_LABELS:-[]}" ;;
   "label create") ;;
   "pr list") cat "$FAKE_GH_PRS" ;;
-  "issue list") cat "$FAKE_GH_ISSUES" ;;
+  "issue list")
+    if [ -n "\${FAKE_GH_ISSUES:-}" ]; then cat "$FAKE_GH_ISSUES"
+    elif [ -n "\${FAKE_GH_SEARCH:-}" ]; then echo "$FAKE_GH_SEARCH"
+    else node -e "$LIST_CREATED" "$d"
+    fi
+    ;;
   "issue view")
     f="$FAKE_GH_STATES/\${3:-}.json"
     if [ ! -f "$f" ]; then echo "GraphQL: Could not resolve to an issue (\${3:-})" >&2; exit 1; fi
@@ -65,6 +81,7 @@ case "\${1:-} \${2:-}" in
     n=$(( $(cat "$d/issue" 2>/dev/null || echo 100) + 1 ))
     echo "$n" > "$d/issue"
     if [ "\${FAKE_GH_FAIL_AT:-}" = "$n" ]; then echo "HTTP 502: Bad Gateway" >&2; exit 1; fi
+    mkdir -p "$d/created" && cp "$d/call-$k.body" "$d/created/$n.md"
     echo "https://github.com/o/r/issues/$n"
     ;;
   *) echo "fake gh: unexpected call: $*" >&2; exit 64 ;;

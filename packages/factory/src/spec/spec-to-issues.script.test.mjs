@@ -51,7 +51,7 @@ describe("spec-to-issues --create", () => {
     });
     expect(stderr).toBe("");
     expect(status).toBe(0);
-    expect(stdout).toContain("Created 3 issues: T1=#101, T2=#102, T3=#103");
+    expect(stdout).toContain("Created 3 issues, reused 0: T1=#101, T2=#102, T3=#103");
 
     const calls = gh.readCalls();
     expect(calls.map((c) => c.args.slice(0, 2).join(" "))).toEqual([
@@ -59,8 +59,11 @@ describe("spec-to-issues --create", () => {
       "label create",
       "label create",
       "label create",
+      "issue list",
       "issue create",
+      "issue list",
       "issue create",
+      "issue list",
       "issue create",
     ]);
     expect(calls.slice(1, 4).map((c) => c.args[2])).toEqual([
@@ -68,8 +71,21 @@ describe("spec-to-issues --create", () => {
       "risk:low",
       "waiting-on-deps",
     ]);
+    // Each create is preceded by a search for the task's hidden marker.
+    expect(calls[4].args).toEqual([
+      "issue",
+      "list",
+      "--state",
+      "all",
+      "--limit",
+      "20",
+      "--search",
+      '"factory-task: specs/001-time-endpoint/tasks.md#T1" in:body',
+      "--json",
+      "number,body",
+    ]);
 
-    const issues = calls.slice(4);
+    const issues = calls.filter((c) => c.args[1] === "create" && c.args[0] === "issue");
     const flag = (args, name) => args.flatMap((a, i) => (args[i - 1] === name ? [a] : []));
     expect(issues.map((c) => flag(c.args, "--title")[0])).toEqual([
       "[agent] Add TimeResponse and buildTime to packages/shared",
@@ -98,8 +114,49 @@ describe("spec-to-issues --create", () => {
     expect(status).toBe(0);
     expect(gh.readCalls().map((c) => c.args.slice(0, 2).join(" "))).toEqual([
       "label list",
+      "issue list",
       "issue create",
     ]);
+  });
+
+  it("is idempotent: a second run reuses the issues carrying each task's marker", () => {
+    const gh = fakeGh();
+    const env = {
+      FAKE_GH_LABELS:
+        '[{"name":"agent"},{"name":"risk:low"},{"name":"waiting-on-deps"},{"name":"ready-for-agent"}]',
+    };
+    expect(run(["specs/001-time-endpoint", "--create"], { gh, env }).status).toBe(0);
+    const firstRun = gh.readCalls().length;
+
+    const { status, stdout, stderr } = run(["specs/001-time-endpoint", "--create"], { gh, env });
+    expect(stderr).toBe("");
+    expect(status).toBe(0);
+    const second = gh.readCalls().slice(firstRun);
+    expect(second.map((c) => c.args.slice(0, 2).join(" "))).toEqual([
+      "label list",
+      "issue list",
+      "issue list",
+      "issue list",
+    ]);
+    expect(stdout).toContain("1/3 T1 -> #101 already exists, skipped");
+    expect(stdout).toContain("3/3 T3 -> #103 already exists, skipped");
+    expect(stdout).toContain("Created 0 issues, reused 3: T1=#101, T2=#102, T3=#103");
+  });
+
+  it("does not reuse an issue that only mentions the marker text loosely", () => {
+    const gh = fakeGh();
+    const { cwd, rel } = writeSpec(task("T1"));
+    // A search hit whose body lacks the exact marker line (e.g. a different spec dir).
+    const env = {
+      FAKE_GH_LABELS: '[{"name":"agent"},{"name":"risk:low"}]',
+      FAKE_GH_SEARCH: JSON.stringify([
+        { number: 7, body: "see factory-task: specs/042-demo/tasks.md#T1 in prose" },
+        { number: 8, body: "<!-- factory-task: specs/042-demo/tasks.md#T10 -->" },
+      ]),
+    };
+    const { status, stdout } = run([rel, "--create"], { gh, cwd, env });
+    expect(status).toBe(0);
+    expect(stdout).toContain("Created 1 issues, reused 0: T1=#101");
   });
 
   it("stops at the first gh failure and reports what was already created", () => {
@@ -111,7 +168,9 @@ describe("spec-to-issues --create", () => {
     expect(status).toBe(1);
     expect(stderr).toContain("gh issue create for T2 failed: HTTP 502: Bad Gateway");
     expect(stderr).toContain("Already created: T1=#101");
-    expect(gh.readCalls().filter((c) => c.args[0] === "issue")).toHaveLength(2);
+    expect(
+      gh.readCalls().filter((c) => c.args[0] === "issue" && c.args[1] === "create"),
+    ).toHaveLength(2);
   });
 });
 
@@ -145,6 +204,17 @@ describe("spec-to-issues errors", () => {
     expect(stderr).toContain("specs/042-demo/tasks.md:9: T2 has no acceptance criteria");
     expect(stderr).toContain('specs/042-demo/tasks.md:14: Unknown key "owner" in T2');
     expect(stderr).toContain("4 problem(s). Fix tasks.md and run again.");
+    expect(gh.readCalls()).toEqual([]);
+  });
+
+  it("rejects a tasks.md that mentions @claude", () => {
+    const gh = fakeGh();
+    const { cwd, rel } = writeSpec(
+      task("T1").replace("goal: Do T1.", "goal: Ask @claude to do T1."),
+    );
+    const { status, stderr } = run([rel, "--create"], { gh, cwd });
+    expect(status).toBe(1);
+    expect(stderr).toContain('specs/042-demo/tasks.md:1: T1 mentions "@claude" in its goal');
     expect(gh.readCalls()).toEqual([]);
   });
 

@@ -5,9 +5,24 @@
 const LINKED = /^[-*] Depends on #([1-9]\d*)\b/i;
 const UNLINKED = /^[-*] Depends on (T\d+) \(no issue yet/i;
 
-const lines = (body: string): string[] => String(body ?? "").split(/\r?\n/);
+const SECTION = /^### Dependencies\s*$/;
+const NEXT_SECTION = /^### /;
 
-/** Issue numbers from `- Depends on #N` bullet lines, deduped, in first-seen order. */
+/**
+ * Lines of the first `### Dependencies` section, up to the next `### ` heading.
+ * Lines elsewhere (for example an acceptance bullet that starts with
+ * "Depends on #5") are ignored.
+ */
+const lines = (body: string): string[] => {
+  const all = String(body ?? "").split(/\r?\n/);
+  const start = all.findIndex((line) => SECTION.test(line));
+  if (start === -1) return [];
+  const rest = all.slice(start + 1);
+  const end = rest.findIndex((line) => NEXT_SECTION.test(line));
+  return end === -1 ? rest : rest.slice(0, end);
+};
+
+/** Issue numbers from `- Depends on #N` bullets in the Dependencies section, deduped, in first-seen order. */
 export function parseDependencyRefs(body: string): number[] {
   const refs: number[] = [];
   for (const line of lines(body)) {

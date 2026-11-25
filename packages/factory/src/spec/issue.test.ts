@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { taskToIssue, type Task } from "./index";
+import { issueMarker, issueMarkerText, taskToIssue, type Task } from "./index";
 
 const base: Task = {
   id: "T2",
@@ -53,6 +53,15 @@ describe("taskToIssue", () => {
         "",
       ].join("\n"),
     );
+  });
+
+  it("exposes the hidden marker it writes as the first body line", () => {
+    const issue = taskToIssue(base, { specDir: "./specs/001-x/", issueNumbersById: {} });
+    expect(issueMarker("./specs/001-x/", "T2")).toBe(
+      "<!-- factory-task: specs/001-x/tasks.md#T2 -->",
+    );
+    expect(issueMarkerText("specs/001-x", "T2")).toBe("factory-task: specs/001-x/tasks.md#T2");
+    expect(issue.body.split("\n")[0]).toBe(issueMarker("specs/001-x", "T2"));
   });
 
   it("normalises the spec dir to a relative posix path", () => {

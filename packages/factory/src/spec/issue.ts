@@ -41,6 +41,17 @@ const normaliseDir = (dir: string): string =>
     .replace(/^(\.\/)+/, "")
     .replace(/\/+$/, "");
 
+/** Text inside the hidden marker; also the phrase spec-to-issues searches for. */
+export const issueMarkerText = (specDir: string, taskId: string): string =>
+  `factory-task: ${normaliseDir(specDir)}/tasks.md#${taskId}`;
+
+/**
+ * Hidden first line of every task issue. spec-to-issues looks for it before
+ * creating an issue, so re-running --create reuses issues instead of duplicating them.
+ */
+export const issueMarker = (specDir: string, taskId: string): string =>
+  `<!-- ${issueMarkerText(specDir, taskId)} -->`;
+
 /**
  * Renders one task as an issue that mirrors the Agent task form. Labels:
  * always `risk:<level>`; plus `agent` for a low/medium task with no
@@ -77,7 +88,7 @@ export function taskToIssue(task: Task, options: TaskToIssueOptions): IssueDraft
         );
 
   const body = [
-    `<!-- factory-task: ${dir}/tasks.md#${task.id} -->`,
+    issueMarker(dir, task.id),
     "",
     "### Goal",
     "",

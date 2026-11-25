@@ -33,17 +33,37 @@ describe("parseDependencyRefs", () => {
   it("returns nothing for empty or unrelated bodies", () => {
     expect(parseDependencyRefs("")).toEqual([]);
     expect(parseDependencyRefs("See #4 and depends on #5 in prose.")).toEqual([]);
+    // Bullets outside a "### Dependencies" section do not count.
+    expect(parseDependencyRefs("- Depends on #5\n")).toEqual([]);
     expect(parseUnlinkedDependencies("")).toEqual([]);
   });
 
   it("accepts CRLF, * bullets and manual lines, dedupes and keeps first-seen order", () => {
     const body =
-      "- Depends on #9\r\n* Depends on #3 (T1)\r\n- Depends on #9 (T2)\n- depends on #4\n";
+      "### Dependencies\r\n\r\n- Depends on #9\r\n* Depends on #3 (T1)\r\n- Depends on #9 (T2)\n- depends on #4\n";
     expect(parseDependencyRefs(body)).toEqual([9, 3, 4]);
   });
 
+  it("reads only the Dependencies section, not acceptance bullets or later sections", () => {
+    const { body } = taskToIssue(
+      { ...task, acceptance: ["Depends on #5 is rendered as a link", "x"], depends: ["T1"] },
+      { specDir: "specs/001", issueNumbersById: { T1: 7 } },
+    );
+    const crafted = body.replace(
+      "### Acceptance criteria\n\n",
+      "### Acceptance criteria\n\n- Depends on #5\n- Depends on T9 (no issue yet)\n",
+    );
+    expect(parseDependencyRefs(crafted)).toEqual([7]);
+    expect(parseUnlinkedDependencies(crafted)).toEqual([]);
+
+    const later = "### Dependencies\n\n- Depends on #7\n\n### Notes\n\n- Depends on #8\n";
+    expect(parseDependencyRefs(later)).toEqual([7]);
+    expect(parseDependencyRefs("#### Dependencies\n- Depends on #7\n")).toEqual([]);
+  });
+
   it("ignores references that are not at the start of a bullet line", () => {
-    const body = "text - Depends on #1\n  - Depends on #2\n- Depends on #x\n- Depends on #0\n";
+    const body =
+      "### Dependencies\n\ntext - Depends on #1\n  - Depends on #2\n- Depends on #x\n- Depends on #0\n";
     expect(parseDependencyRefs(body)).toEqual([]);
   });
 });

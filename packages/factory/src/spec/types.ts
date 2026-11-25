@@ -52,7 +52,8 @@ export type ValidationCode =
   | "dependency-cycle"
   | "empty-acceptance"
   | "unknown-area"
-  | "unknown-risk";
+  | "unknown-risk"
+  | "agent-mention";
 
 export interface ValidationError {
   code: ValidationCode;
