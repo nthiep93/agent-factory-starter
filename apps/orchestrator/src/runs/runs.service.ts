@@ -1,0 +1,52 @@
+import { BadRequestException, Inject, Injectable } from "@nestjs/common";
+import { TASK_QUEUE, type ListedState, type TaskQueue } from "../tasks/task-queue.js";
+import type { RunRecord } from "../tasks/task.types.js";
+
+export interface RunView {
+  id: string;
+  issueNumber: number;
+  title: string;
+  state: string;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  record: RunRecord | null;
+  failedReason: string | null;
+}
+
+export const DEFAULT_LIMIT = 20;
+export const MAX_LIMIT = 100;
+const STATES: readonly ListedState[] = ["waiting", "active", "completed", "failed"];
+
+const iso = (ms: number | null): string | null => (ms ? new Date(ms).toISOString() : null);
+
+/** Recent runs read straight from BullMQ: the queue is the only store. */
+@Injectable()
+export class RunsService {
+  constructor(@Inject(TASK_QUEUE) private readonly queue: TaskQueue) {}
+
+  async recent(limitParam?: string): Promise<RunView[]> {
+    const limit = parseLimit(limitParam);
+    const snapshots = await this.queue.list(STATES, limit);
+    return snapshots.map((s) => ({
+      id: s.id,
+      issueNumber: s.data.issueNumber,
+      title: s.data.title,
+      state: s.state,
+      createdAt: iso(s.createdAt) ?? "",
+      startedAt: iso(s.startedAt),
+      finishedAt: iso(s.finishedAt),
+      record: s.record,
+      failedReason: s.failedReason,
+    }));
+  }
+}
+
+function parseLimit(raw: string | undefined): number {
+  if (raw === undefined || raw === "") return DEFAULT_LIMIT;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1 || value > MAX_LIMIT) {
+    throw new BadRequestException(`limit must be an integer between 1 and ${MAX_LIMIT}`);
+  }
+  return value;
+}
